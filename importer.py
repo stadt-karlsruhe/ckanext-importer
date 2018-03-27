@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 
+import copy
 import logging
 import re
+
+import jsondiff
 
 
 log = logging.getLogger(__name__)
@@ -27,6 +30,22 @@ def _get_extra(pkg, key):
     raise KeyError(key)
 
 
+def _set_extra(pkg, key, value):
+    '''
+    Set the value of a package extra.
+
+    If there is an existing extra with the given key its value is
+    replaced. Otherwise, a new extra is appended at the end of the
+    extras list.
+    '''
+    extras = pkg.setdefault('extras', [])
+    for extra in extras:
+        if extra['key'] == key:
+            extra['value'] = value
+            return
+    extras.append({'key': key, 'value': value})
+
+
 class Importer(object):
 
     def __init__(self, id, api):
@@ -49,6 +68,7 @@ class Importer(object):
         # Find all existing datasets that belong to the importer
         existing_pkgs = self._find_pkgs_by_extra('ckanext_importer_importer_id', solr_escape(self.id))
         log.debug('Found {} existing package(s)'.format(len(existing_pkgs)))
+        #log.debug([pkg['name'] for pkg in existing_pkgs])
 
         # For each existing dataset: if it has a master, update it, otherwise remove it
         for existing_pkg in existing_pkgs:
@@ -80,9 +100,35 @@ class Importer(object):
 
         ``master`` is the description for that dataset.
         '''
-        log.info('Synchronizing dataset {}'.format(master['name']))
-        # TODO
+        name = master['name']
+        log.info('Synchronizing dataset {}'.format(name))
+        self._warn_for_unknown_special_keys(master)
 
+        updated = copy.deepcopy(existing)
+        updated.update((key, value) for key, value in master.items() if key[0] != '_')
+
+        # Make sure the importer ID is listed in the extras, it might
+        # have been overwritten if the master supplied its own extras.
+        _set_extra(updated, 'ckanext_importer_importer_id', self.id)
+        # CKAN sorts extras by their key, so we need to also do that.
+        # Otherwise the difference check further down returns false
+        # positives.
+        updated['extras'].sort(key=lambda extra: extra['key'])
+
+        org = updated['organization']
+        if master['_organization'] not in (org['id'], org['name']):
+            log.debug('Organisation of dataset {} changed'.format(name))
+            del updated['organization']
+            updated['owner_org'] = master['_organization']
+
+        if existing != updated:
+            log.debug('Dataset {} has changed'.format(name))
+            #log.debug(jsondiff.diff(existing, updated))
+            #log.debug(existing)
+            #log.debug(updated)
+            self._call_action('package_update', **updated)
+        else:
+            log.debug('Dataset {} has not changed'.format(name))
 
     def _create_pkg(self, master):
         '''
@@ -93,19 +139,12 @@ class Importer(object):
         CKAN errors are logged and swallowed.
         '''
         name = master['name']
-        log.debug('Creating new dataset {}'.format(name))
+        log.info('Creating new dataset {}'.format(name))
+        self._warn_for_unknown_special_keys(master)
 
         new_pkg = {key: value for key, value in master.items() if key[0] != '_'}
 
-        special_keys = set(key for key in master if key[0] == '_')
-        unknown_keys = special_keys.difference({'_organization'})
-        if unknown_keys:
-            log.warning('Ignoring unknown special key(s) {} in dataset {}'.format(list(unknown_keys), name))
-
-        new_pkg.setdefault('extras', []).append({
-            'key': 'ckanext_importer_importer_id',
-            'value': self.id,
-        })
+        _set_extra(new_pkg, 'ckanext_importer_importer_id', self.id)
 
         new_pkg['owner_org'] = master['_organization']
 
@@ -115,7 +154,14 @@ class Importer(object):
             log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
 
-        log.info('Created new dataset {}'.format(name))
+    def _warn_for_unknown_special_keys(self, master):
+        '''
+        Emit a warning for unknown special keys in a master dict.
+        '''
+        special_keys = set(key for key in master if key[0] == '_')
+        unknown_keys = special_keys.difference({'_organization'})
+        if unknown_keys:
+            log.warning('Ignoring unknown special key(s) {} in dataset {}'.format(list(unknown_keys), master['name']))
 
     def _purge_pkg(self, existing):
         '''
@@ -157,21 +203,25 @@ if __name__ == '__main__':
             'title': 'No name to test the warning',
         },
         {
-            'title': 'No _organization to test the warning',
-            'name': 'invalid',
+            'name': 'No _organization to test the warning',
         },
         {
             'name': 'a-first-test',
             '_organization': 'stadt-karlsruhe',
+            'title': 'We have a title!',
         },
         {
             'name': 'a-test-with-extras',
             'extras': [
-                {'key': 'something', 'value': 'special'},
+                {'key': 'something', 'value': 'special?'},
             ],
             '_organization': 'stadt-karlsruhe',
             '_unknown1': 'An unknown special key',
             '_unknown2': 'Another unknown special key',
+        },
+        {
+            'name': 'a-test-with-an-organization-id-instead-of-name',
+            '_organization': '12d5f4e4-036e-49de-84ef-5a8d617a3f9b',
         },
     ]
 
