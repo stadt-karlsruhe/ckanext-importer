@@ -44,19 +44,18 @@ class Importer(object):
         '''
         ``master`` is a list of dataset descriptions.
         '''
-        master_pkgs = {pkg['_id']: pkg for pkg in self._check_master(master)}
+        master_pkgs = {pkg['name']: pkg for pkg in self._check_master(master)}
 
         # Find all existing datasets that belong to the importer
         existing_pkgs = self._find_pkgs_by_extra('ckanext_importer_importer_id', solr_escape(self.id))
-        log.debug('Found {} existing package(s).'.format(len(existing_pkgs)))
+        log.debug('Found {} existing package(s)'.format(len(existing_pkgs)))
 
         # For each existing dataset: if it has a master, update it, otherwise remove it
         for existing_pkg in existing_pkgs:
-            dataset_id = _get_extra(existing_pkg, 'ckanext_importer_dataset_id')
             try:
-                master_pkg = master_pkgs.pop(dataset_id)
+                master_pkg = master_pkgs.pop(existing_pkg['name'])
             except KeyError:
-                log.info('No master for existing dataset {} (CKAN ID {}), removing it.'.format(dataset_id, existing_pkg['id']))
+                log.info('No master for existing dataset {}, removing it'.format(existing_pkg['name']))
                 # TODO: Remove the existing dataset
                 continue
             self._sync_pkg(existing_pkg, master_pkg)
@@ -66,15 +65,12 @@ class Importer(object):
             self._create_pkg(master_pkg)
 
     def _check_master(self, master):
-        with_id = [pkg for pkg in master if '_id' in pkg]
-        if len(with_id) != len(master):
-            log.warning('Ignoring {} dataset(s) without "_id" attribute.'.format(len(master) - len(with_id)))
-        with_org = [pkg for pkg in master if '_organization' in pkg]
-        if len(with_org) != len(with_id):
-            log.warning('Ignoring {} dataset(s) without "_organization" attribute.'.format(len(with_id) - len(with_org)))
-        unique_ids = set(pkg['_id'] for pkg in with_org)
-        if len(unique_ids) != len(with_org):
-            log.warning('Found {} dataset master(s) with duplicate "_id" values.'.format(len(with_org) - len(unique_ids)))
+        with_name = [pkg for pkg in master if 'name' in pkg]
+        if len(with_name) != len(master):
+            log.warning('Ignoring {} dataset(s) without "name" attribute'.format(len(master) - len(with_name)))
+        with_org = [pkg for pkg in with_name if '_organization' in pkg]
+        if len(with_org) != len(with_name):
+            log.warning('Ignoring {} dataset(s) without "_organization" attribute'.format(len(with_name) - len(with_org)))
         return with_org
 
     def _sync_pkg(self, existing, master):
@@ -85,7 +81,7 @@ class Importer(object):
 
         ``master`` is the description for that dataset.
         '''
-        log.info('Synchronizing dataset {} (CKAN ID {})'.format(master['_id'], existing['id']))
+        log.info('Synchronizing dataset {}'.format(master['name']))
         # TODO
 
 
@@ -97,30 +93,30 @@ class Importer(object):
 
         CKAN errors are logged and swallowed.
         '''
-        id = master['_id']
-        log.debug('Creating new dataset {}'.format(id))
+        name = master['name']
+        log.debug('Creating new dataset {}'.format(name))
 
         new_pkg = {key: value for key, value in master.items() if key[0] != '_'}
 
         special_keys = set(key for key in master if key[0] == '_')
-        unknown_keys = special_keys.difference({'_id', '_organization'})
+        unknown_keys = special_keys.difference({'_organization'})
         if unknown_keys:
-            log.warning('Ignoring unknown special key(s) {} in dataset {}'.format(list(unknown_keys), id))
+            log.warning('Ignoring unknown special key(s) {} in dataset {}'.format(list(unknown_keys), name))
 
-        new_pkg.setdefault('extras', []).extend([
-            {'key': 'ckanext_importer_importer_id', 'value': self.id},
-            {'key': 'ckanext_importer_dataset_id', 'value': id},
-        ])
+        new_pkg.setdefault('extras', []).append({
+            'key': 'ckanext_importer_importer_id',
+            'value': self.id,
+        })
 
         new_pkg['owner_org'] = master['_organization']
 
         try:
             new_pkg = self.call_action('package_create', **new_pkg)
         except Exception as e:
-            log.error('Error while creating new dataset {}: {}'.format(id, e))
+            log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
 
-        log.info('New dataset {} has CKAN ID {}'.format(id, new_pkg['id']))
+        log.info('Created new dataset {}'.format(name))
 
     def _find_pkgs_by_extra(self, key, value='*'):
         '''
@@ -150,19 +146,17 @@ if __name__ == '__main__':
 
     master = [
         {
-            'title': 'No _id to test the warning',
+            'title': 'No name to test the warning',
         },
         {
             'title': 'No _organization to test the warning',
-            '_id': 'invalid',
+            'name': 'invalid',
         },
         {
-            '_id': 'test-01',
             'name': 'a-first-test',
             '_organization': 'stadt-karlsruhe',
         },
         {
-            '_id': 'test-02',
             'name': 'a-test-with-extras',
             'extras': [
                 {'key': 'something', 'value': 'special'},
