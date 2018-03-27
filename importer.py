@@ -37,7 +37,7 @@ class Importer(object):
         self.id = id
         self.api = api
 
-    def call_action(self, method_name, **kwargs):
+    def _call_action(self, method_name, **kwargs):
         return self.api.call_action(method_name, kwargs)
 
     def sync(self, master):
@@ -55,8 +55,7 @@ class Importer(object):
             try:
                 master_pkg = master_pkgs.pop(existing_pkg['name'])
             except KeyError:
-                log.info('No master for existing dataset {}, removing it'.format(existing_pkg['name']))
-                # TODO: Remove the existing dataset
+                self._purge_pkg(existing_pkg)
                 continue
             self._sync_pkg(existing_pkg, master_pkg)
 
@@ -111,12 +110,21 @@ class Importer(object):
         new_pkg['owner_org'] = master['_organization']
 
         try:
-            new_pkg = self.call_action('package_create', **new_pkg)
+            new_pkg = self._call_action('package_create', **new_pkg)
         except Exception as e:
             log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
 
         log.info('Created new dataset {}'.format(name))
+
+    def _purge_pkg(self, existing):
+        '''
+        Purge an existing CKAN dataset.
+
+        ``existing`` is the package dict.
+        '''
+        log.info('Purging dataset {}'.format(existing['name']))
+        self._call_action('dataset_purge', id=existing['id'])
 
     def _find_pkgs_by_extra(self, key, value='*'):
         '''
@@ -132,7 +140,7 @@ class Importer(object):
         '''
         fq = 'extras_{key}:"{value}"'.format(key=key, value=value)
         # FIXME: Support for paging
-        return self.call_action('package_search', fq=fq, rows='1000')['results']
+        return self._call_action('package_search', fq=fq, rows='1000')['results']
 
 
 if __name__ == '__main__':
