@@ -87,9 +87,12 @@ class Importer(object):
         with_name = [pkg for pkg in master if 'name' in pkg]
         if len(with_name) != len(master):
             log.warning('Ignoring {} dataset(s) without "name" attribute'.format(len(master) - len(with_name)))
-        with_org = [pkg for pkg in with_name if '_organization' in pkg]
-        if len(with_org) != len(with_name):
-            log.warning('Ignoring {} dataset(s) without "_organization" attribute'.format(len(with_name) - len(with_org)))
+        with_org = []
+        for pkg in with_name:
+            if 'owner_org' in pkg:
+                with_org.append(pkg)
+            else:
+                log.warning('Ignoring master "{}" because it has no "owner_org" attribute'.format(pkg['name']))
         return with_org
 
     def _sync_pkg(self, existing, master):
@@ -102,10 +105,11 @@ class Importer(object):
         '''
         name = master['name']
         log.info('Synchronizing dataset {}'.format(name))
-        self._warn_for_unknown_special_keys(master)
 
         updated = copy.deepcopy(existing)
-        updated.update((key, value) for key, value in master.items() if key[0] != '_')
+        # The organisation is handled specially, see below
+        updated.update((key, value) for key, value in master.items()
+                       if key != 'owner_org')
 
         # Make sure the importer ID is listed in the extras, it might
         # have been overwritten if the master supplied its own extras.
@@ -116,16 +120,16 @@ class Importer(object):
         updated['extras'].sort(key=lambda extra: extra['key'])
 
         org = updated['organization']
-        if master['_organization'] not in (org['id'], org['name']):
+        if master['owner_org'] not in (org['id'], org['name']):
             log.debug('Organisation of dataset {} changed'.format(name))
             del updated['organization']
-            updated['owner_org'] = master['_organization']
+            updated['owner_org'] = master['owner_org']
 
         if existing != updated:
             log.debug('Dataset {} has changed'.format(name))
-            #log.debug(jsondiff.diff(existing, updated))
-            #log.debug(existing)
-            #log.debug(updated)
+            log.debug(jsondiff.diff(existing, updated))
+            log.debug(existing)
+            log.debug(updated)
             self._call_action('package_update', **updated)
         else:
             log.debug('Dataset {} has not changed'.format(name))
@@ -140,28 +144,15 @@ class Importer(object):
         '''
         name = master['name']
         log.info('Creating new dataset {}'.format(name))
-        self._warn_for_unknown_special_keys(master)
 
-        new_pkg = {key: value for key, value in master.items() if key[0] != '_'}
-
+        new_pkg = copy.deepcopy(master)
         _set_extra(new_pkg, 'ckanext_importer_importer_id', self.id)
-
-        new_pkg['owner_org'] = master['_organization']
 
         try:
             new_pkg = self._call_action('package_create', **new_pkg)
         except Exception as e:
             log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
-
-    def _warn_for_unknown_special_keys(self, master):
-        '''
-        Emit a warning for unknown special keys in a master dict.
-        '''
-        special_keys = set(key for key in master if key[0] == '_')
-        unknown_keys = special_keys.difference({'_organization'})
-        if unknown_keys:
-            log.warning('Ignoring unknown special key(s) {} in dataset {}'.format(list(unknown_keys), master['name']))
 
     def _purge_pkg(self, existing):
         '''
@@ -203,11 +194,11 @@ if __name__ == '__main__':
             'title': 'No name to test the warning',
         },
         {
-            'name': 'No _organization to test the warning',
+            'name': 'no-owner_org-to-test-the-warning',
         },
         {
             'name': 'a-first-test',
-            '_organization': 'stadt-karlsruhe',
+            'owner_org': 'stadt-karlsruhe',
             'title': 'We have a title!',
         },
         {
@@ -215,13 +206,11 @@ if __name__ == '__main__':
             'extras': [
                 {'key': 'something', 'value': 'special?'},
             ],
-            '_organization': 'stadt-karlsruhe',
-            '_unknown1': 'An unknown special key',
-            '_unknown2': 'Another unknown special key',
+            'owner_org': 'stadt-karlsruhe',
         },
         {
             'name': 'a-test-with-an-organization-id-instead-of-name',
-            '_organization': '12d5f4e4-036e-49de-84ef-5a8d617a3f9b',
+            'owner_org': '12d5f4e4-036e-49de-84ef-5a8d617a3f9b',
         },
     ]
 
