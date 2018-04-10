@@ -1,6 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 import copy
+from itertools import izip_longest
 import logging
 import re
 
@@ -107,9 +108,9 @@ class Importer(object):
         log.info('Synchronizing dataset {}'.format(name))
 
         updated = copy.deepcopy(existing)
-        # The organisation is handled specially, see below
+        special_keys = {'owner_org', 'resources'}
         updated.update((key, value) for key, value in master.items()
-                       if key != 'owner_org')
+                       if key not in special_keys)
 
         # Make sure the importer ID is listed in the extras, it might
         # have been overwritten if the master supplied its own extras.
@@ -125,11 +126,30 @@ class Importer(object):
             del updated['organization']
             updated['owner_org'] = master['owner_org']
 
+        updated_resources = []
+        for res_num, (existing_res, master_res) in enumerate(izip_longest(updated['resources'], master.get('resources', []))):
+            if existing_res is None:
+                # Additional resources in master
+                log.debug('Additional resource #{} in master for dataset {}'.format(res_num, name))
+                updated_resources.append(master_res)
+            elif master_res is None:
+                # Resources have been removed in master
+                log.debug('Removing resource #{} from dataset {} because it is missing from master'.format(
+                          res_num, name))
+                pass
+            else:
+                updated_res = copy.deepcopy(existing_res)
+                updated_res.update(master_res)
+                if updated_res != existing_res:
+                    log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
+                updated_resources.append(updated_res)
+        updated['resources'] = updated_resources
+
         if existing != updated:
             log.debug('Dataset {} has changed'.format(name))
             log.debug(jsondiff.diff(existing, updated))
-            log.debug(existing)
-            log.debug(updated)
+            #log.debug(existing)
+            #log.debug(updated)
             self._call_action('package_update', **updated)
         else:
             log.debug('Dataset {} has not changed'.format(name))
@@ -211,6 +231,19 @@ if __name__ == '__main__':
         {
             'name': 'a-test-with-an-organization-id-instead-of-name',
             'owner_org': '12d5f4e4-036e-49de-84ef-5a8d617a3f9b',
+        },
+        {
+            'name': 'a-test-with-resources',
+            'owner_org': 'stadt-karlsruhe',
+            'resources': [
+                {
+                    'name': 'A new name',
+                    'url': 'https://some-url2',
+                },
+                {
+                    'url': 'https://a-url',
+                },
+            ],
         },
     ]
 
