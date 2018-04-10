@@ -57,8 +57,23 @@ class Importer(object):
         self.id = id
         self.api = api
 
-    def _call_action(self, method_name, **kwargs):
-        return self.api.call_action(method_name, kwargs)
+    def _upload_resource_file(self, filename, res):
+        '''
+        Upload a file as a resource's data.
+
+        ``filename`` is the name of the file.
+
+        ``res`` is the resource dict.
+
+        The resource must already exist.
+        '''
+        res = copy.deepcopy(res)
+        with open(filename, 'rb') as f:
+            res.setdefault('url', 'unused-but-required')
+            return self._call_action('resource_update', res, files={'upload': f})
+
+    def _call_action(self, method_name, data, **kwargs):
+        return self.api.call_action(method_name, data, **kwargs)
 
     def sync(self, master):
         '''
@@ -126,12 +141,23 @@ class Importer(object):
             del updated['organization']
             updated['owner_org'] = master['owner_org']
 
+        file_uploads = {}
+
         updated_resources = []
         for res_num, (existing_res, master_res) in enumerate(izip_longest(updated['resources'], master.get('resources', []))):
             if existing_res is None:
                 # Additional resources in master
                 log.debug('Additional resource #{} in master for dataset {}'.format(res_num, name))
-                updated_resources.append(master_res)
+
+                special_keys = {'_file'}
+                new_res = {key: value for key, value in master_res.items()
+                           if key not in special_keys}
+
+                if '_file' in master_res:
+                    file_uploads[res_num] = master_res['_file']
+                    new_res.setdefault('url', 'unused-but-required')
+
+                updated_resources.append(new_res)
             elif master_res is None:
                 # Resources have been removed in master
                 log.debug('Removing resource #{} from dataset {} because it is missing from master'.format(
@@ -139,10 +165,18 @@ class Importer(object):
                 pass
             else:
                 updated_res = copy.deepcopy(existing_res)
-                updated_res.update(master_res)
+
+                special_keys = {'_file'}
+                updated_res.update((key, value) for key, value in master_res.items()
+                                   if key not in special_keys)
+
+                if '_file' in master_res:
+                    file_uploads[res_num] = master_res['_file']
+
                 if updated_res != existing_res:
                     log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
                 updated_resources.append(updated_res)
+
         updated['resources'] = updated_resources
 
         if existing != updated:
@@ -150,9 +184,16 @@ class Importer(object):
             log.debug(jsondiff.diff(existing, updated))
             #log.debug(existing)
             #log.debug(updated)
-            self._call_action('package_update', **updated)
+            updated = self._call_action('package_update', updated)
         else:
             log.debug('Dataset {} has not changed'.format(name))
+
+        for res_num, filename in file_uploads.items():
+            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, name))
+            # We need to make sure to use the package dict returned by CKAN after a potential
+            # update here, because resource masters don't have their `id` and `package_id` set.
+            self._upload_resource_file(filename, updated['resources'][res_num])
+
 
     def _create_pkg(self, master):
         '''
@@ -165,14 +206,36 @@ class Importer(object):
         name = master['name']
         log.info('Creating new dataset {}'.format(name))
 
-        new_pkg = copy.deepcopy(master)
+        special_keys = {'resources'}
+        new_pkg = {key: copy.deepcopy(value) for key, value in master.items()
+                   if key not in special_keys}
+
         _set_extra(new_pkg, 'ckanext_importer_importer_id', self.id)
 
+        file_uploads = {}
+
+        new_pkg['resources'] = new_resources = []
+        for i, res in enumerate(master.get('resources', [])):
+            special_keys = {'_file'}
+            new_res = {key: copy.deepcopy(value) for key, value in res.items()
+                       if key not in special_keys}
+
+            if '_file' in res:
+                file_uploads[i] = res['_file']
+                new_res.setdefault('url', 'unused-but-required')
+
+            new_resources.append(new_res)
+
         try:
-            new_pkg = self._call_action('package_create', **new_pkg)
+            new_pkg = self._call_action('package_create', new_pkg)
         except Exception as e:
             log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
+
+        for res_num, filename in file_uploads.items():
+            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, name))
+            self._upload_resource_file(filename, new_pkg['resources'][res_num])
+
 
     def _purge_pkg(self, existing):
         '''
@@ -181,7 +244,7 @@ class Importer(object):
         ``existing`` is the package dict.
         '''
         log.info('Purging dataset {}'.format(existing['name']))
-        self._call_action('dataset_purge', id=existing['id'])
+        self._call_action('dataset_purge', {'id': existing['id']})
 
     def _find_pkgs_by_extra(self, key, value='*'):
         '''
@@ -197,7 +260,7 @@ class Importer(object):
         '''
         fq = 'extras_{key}:"{value}"'.format(key=key, value=value)
         # FIXME: Support for paging
-        return self._call_action('package_search', fq=fq, rows='1000')['results']
+        return self._call_action('package_search', {'fq':fq, 'rows': '1000'})['results']
 
 
 if __name__ == '__main__':
@@ -245,6 +308,15 @@ if __name__ == '__main__':
                 },
             ],
         },
+        {
+            'name': 'a-resource-with-a-file-upload',
+            'owner_org': 'stadt-karlsruhe',
+            'resources': [
+                {
+                    '_file': 'test1.csv',
+                },
+            ],
+        }
     ]
 
     with io.open('apikey.json', 'r', encoding='utf-8') as f:
