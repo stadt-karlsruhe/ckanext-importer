@@ -1,6 +1,7 @@
 #!/usr/bin/env python2
 
 import copy
+import hashlib
 from itertools import izip_longest
 import logging
 import re
@@ -47,6 +48,17 @@ def _set_extra(pkg, key, value):
     extras.append({'key': key, 'value': value})
 
 
+def file_hash(filename, cls=hashlib.sha1, block_size=65536):
+    '''
+    Compute the hash of a file on disk.
+    '''
+    with open(filename, 'rb') as f:
+        hasher = cls()
+        for block in iter(lambda: f.read(block_size), b''):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
 def _update_dict(d1, d2, exclude=None):
     '''
     Update one dict with items from another one.
@@ -57,6 +69,9 @@ def _update_dict(d1, d2, exclude=None):
     '''
     exclude = exclude or []
     d1.update((key, value) for key, value in d2.items() if key not in exclude)
+
+
+
 
 
 class Importer(object):
@@ -186,8 +201,10 @@ class Importer(object):
                 new_res = {}
                 _update_dict(new_res, master_res, exclude={'_file'})
                 if '_file' in master_res:
-                    file_uploads[res_num] = master_res['_file']
+                    filename = master_res['_file']
+                    file_uploads[res_num] = filename
                     new_res.setdefault('url', 'unused-but-required')
+                    new_res['ckanext_importer_file_sha1'] = file_hash(filename)
                 updated_resources.append(new_res)
             elif master_res is None:
                 # Resources have been removed in master
@@ -198,7 +215,12 @@ class Importer(object):
                 updated_res = copy.deepcopy(res)
                 _update_dict(updated_res, master_res, exclude={'_file'})
                 if '_file' in master_res:
-                    file_uploads[res_num] = master_res['_file']
+                    filename = master_res['_file']
+                    new_hash = file_hash(filename)
+                    if new_hash != updated_res.get('ckanext_importer_file_sha1'):
+                        log.debug('File content of resource #{} of dataset {} has changed'.format(res_num, name))
+                        file_uploads[res_num] = filename
+                        updated_res['ckanext_importer_file_sha1'] = new_hash
                 if updated_res != res:
                     log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
                 updated_resources.append(updated_res)
