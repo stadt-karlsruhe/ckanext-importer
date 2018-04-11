@@ -47,6 +47,18 @@ def _set_extra(pkg, key, value):
     extras.append({'key': key, 'value': value})
 
 
+def _update_dict(d1, d2, exclude=None):
+    '''
+    Update one dict with items from another one.
+
+    Puts all items of ``d2`` into ``d1`` (in-place).
+
+    ``exclude`` can be a list of keys in ``d2`` which are ignored.
+    '''
+    exclude = exclude or []
+    d1.update((key, value) for key, value in d2.items() if key not in exclude)
+
+
 class Importer(object):
 
     def __init__(self, id, api):
@@ -123,9 +135,7 @@ class Importer(object):
         log.info('Synchronizing dataset {}'.format(name))
 
         updated = copy.deepcopy(existing)
-        special_keys = {'owner_org', 'resources'}
-        updated.update((key, value) for key, value in master.items()
-                       if key not in special_keys)
+        _update_dict(updated, master, exclude={'owner_org', 'resources'})
 
         # Make sure the importer ID is listed in the extras, it might
         # have been overwritten if the master supplied its own extras.
@@ -141,43 +151,7 @@ class Importer(object):
             del updated['organization']
             updated['owner_org'] = master['owner_org']
 
-        file_uploads = {}
-
-        updated_resources = []
-        for res_num, (existing_res, master_res) in enumerate(izip_longest(updated['resources'], master.get('resources', []))):
-            if existing_res is None:
-                # Additional resources in master
-                log.debug('Additional resource #{} in master for dataset {}'.format(res_num, name))
-
-                special_keys = {'_file'}
-                new_res = {key: value for key, value in master_res.items()
-                           if key not in special_keys}
-
-                if '_file' in master_res:
-                    file_uploads[res_num] = master_res['_file']
-                    new_res.setdefault('url', 'unused-but-required')
-
-                updated_resources.append(new_res)
-            elif master_res is None:
-                # Resources have been removed in master
-                log.debug('Removing resource #{} from dataset {} because it is missing from master'.format(
-                          res_num, name))
-                pass
-            else:
-                updated_res = copy.deepcopy(existing_res)
-
-                special_keys = {'_file'}
-                updated_res.update((key, value) for key, value in master_res.items()
-                                   if key not in special_keys)
-
-                if '_file' in master_res:
-                    file_uploads[res_num] = master_res['_file']
-
-                if updated_res != existing_res:
-                    log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
-                updated_resources.append(updated_res)
-
-        updated['resources'] = updated_resources
+        file_uploads = self._update_resources(updated, master)
 
         if existing != updated:
             log.debug('Dataset {} has changed'.format(name))
@@ -188,12 +162,64 @@ class Importer(object):
         else:
             log.debug('Dataset {} has not changed'.format(name))
 
+        self._upload_files(updated, file_uploads)
+
+    def _update_resources(self, pkg, master):
+        '''
+        Update resources in a package according to a master.
+
+        ``pkg`` is a package dict and ``master`` is a package master.
+
+        Returns a list of files that need to be uploaded as a dict which
+        maps resource indices to filenames.
+        '''
+        name = master['name']
+        resources = pkg.get('resources', [])
+        master_resources = master.get('resources', [])
+        updated_resources = []
+        file_uploads = {}
+
+        for res_num, (res, master_res) in enumerate(izip_longest(resources, master_resources)):
+            if res is None:
+                # Additional resources in master
+                log.debug('Additional resource #{} in master for dataset {}'.format(res_num, name))
+                new_res = {}
+                _update_dict(new_res, master_res, exclude={'_file'})
+                if '_file' in master_res:
+                    file_uploads[res_num] = master_res['_file']
+                    new_res.setdefault('url', 'unused-but-required')
+                updated_resources.append(new_res)
+            elif master_res is None:
+                # Resources have been removed in master
+                log.debug('Removing resource #{} from dataset {} because it is missing from master'.format(
+                          res_num, name))
+                pass
+            else:
+                updated_res = copy.deepcopy(res)
+                _update_dict(updated_res, master_res, exclude={'_file'})
+                if '_file' in master_res:
+                    file_uploads[res_num] = master_res['_file']
+                if updated_res != res:
+                    log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
+                updated_resources.append(updated_res)
+
+        pkg['resources'] = updated_resources
+
+        return file_uploads
+
+    def _upload_files(self, pkg, file_uploads):
+        '''
+        Upload files to resources of a package.
+
+        ``pkg`` is a package dict.
+
+        ``file_uploads`` is a dict that maps resource indices to filenames.
+        '''
         for res_num, filename in file_uploads.items():
-            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, name))
+            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, pkg['name']))
             # We need to make sure to use the package dict returned by CKAN after a potential
             # update here, because resource masters don't have their `id` and `package_id` set.
-            self._upload_resource_file(filename, updated['resources'][res_num])
-
+            self._upload_resource_file(filename, pkg['resources'][res_num])
 
     def _create_pkg(self, master):
         '''
@@ -206,25 +232,12 @@ class Importer(object):
         name = master['name']
         log.info('Creating new dataset {}'.format(name))
 
-        special_keys = {'resources'}
-        new_pkg = {key: copy.deepcopy(value) for key, value in master.items()
-                   if key not in special_keys}
+        new_pkg = {}
+        _update_dict(new_pkg, copy.deepcopy(master), exclude={'resources'})
 
         _set_extra(new_pkg, 'ckanext_importer_importer_id', self.id)
 
-        file_uploads = {}
-
-        new_pkg['resources'] = new_resources = []
-        for i, res in enumerate(master.get('resources', [])):
-            special_keys = {'_file'}
-            new_res = {key: copy.deepcopy(value) for key, value in res.items()
-                       if key not in special_keys}
-
-            if '_file' in res:
-                file_uploads[i] = res['_file']
-                new_res.setdefault('url', 'unused-but-required')
-
-            new_resources.append(new_res)
+        file_uploads = self._update_resources(new_pkg, master)
 
         try:
             new_pkg = self._call_action('package_create', new_pkg)
@@ -232,10 +245,7 @@ class Importer(object):
             log.error('Error while creating new dataset {}: {}'.format(name, e))
             return
 
-        for res_num, filename in file_uploads.items():
-            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, name))
-            self._upload_resource_file(filename, new_pkg['resources'][res_num])
-
+        self._upload_files(new_pkg, file_uploads)
 
     def _purge_pkg(self, existing):
         '''
