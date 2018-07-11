@@ -4,6 +4,7 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 import collections
+import json
 
 import lib
 
@@ -73,7 +74,27 @@ class Importer(object):
             self._package._upload()
 
 
-class Package(collections.MutableMapping):
+class DictWrapper(collections.MutableMapping):
+    def __init__(self, d):
+        self._dict = d
+
+    def __getitem__(self, key):
+        return self._dict[key]
+
+    def __setitem__(self, key, value):
+        self._dict[key] = value
+
+    def __delitem__(self, key):
+        del self._dict[key]
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __len__(self):
+        return len(self._dict)
+
+
+class Package(DictWrapper):
     '''
     Wrapper around a CKAN package dict.
 
@@ -81,24 +102,9 @@ class Package(collections.MutableMapping):
     instead.
     '''
     def __init__(self, api, pkg_dict):
+        super(Package, self).__init__(pkg_dict)
         self._api = api
-        self._pkg_dict = pkg_dict
         self.extras = ExtrasDictView(pkg_dict['extras'])
-
-    def __getitem__(self, key):
-        return self._pkg_dict[key]
-
-    def __setitem__(self, key, value):
-        self._pkg_dict[key] = value
-
-    def __delitem__(self, key):
-        del self._pkg_dict[key]
-
-    def __iter__(self):
-        return iter(self._pkg_dict)
-
-    def __len__(self):
-        return len(self._pkg_dict)
 
     def __repr__(self):
         return '<{} {}>'.format(self.__class__.__name__, self['id'])
@@ -107,7 +113,7 @@ class Package(collections.MutableMapping):
         '''
         Upload package dict to CKAN.
         '''
-        self._api.action.package_update(**self._pkg_dict)
+        self._api.action.package_update(**self._dict)
 
     @lib.nested_cm_method
     class sync_resource(object):
@@ -124,7 +130,7 @@ class Package(collections.MutableMapping):
                 print('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
 
         def _find_res(self):
-            return [res_dict for res_dict in self._outer._pkg_dict['resources']
+            return [res_dict for res_dict in self._outer._dict['resources']
                     if res_dict['ckanext_importer_resource_eid'] == self._eid]
 
         def _create_res(self):
@@ -135,11 +141,11 @@ class Package(collections.MutableMapping):
             self._propagate_changes()
 
         def __enter__(self):
-            print('sync_resource.__enter__')
-            return self._res_dict
+            #print('sync_resource.__enter__')
+            return Resource(self._outer, self._res_dict)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            print('sync_resource.__exit__')
+            #print('sync_resource.__exit__')
             if exc_type is not None:
                 print('Exception during synchronization of resource {} (EID {}): {}'.format(
                     self._res_dict['id'], self._eid, exc_val))
@@ -159,14 +165,62 @@ class Package(collections.MutableMapping):
             '''
             Propagate changes in the cached resource dict to the cached package dict.
             '''
-            for res_dict in self._outer._pkg_dict['resources']:
+            for res_dict in self._outer._dict['resources']:
                 if res_dict['id'] == self._res_dict['id']:
                     # Update existing cached resource
                     res_dict.clear()
                     res_dict.update(self._res_dict)
                     return
             # Append new cached resource
-            self._outer._pkg_dict['resources'].append(self._res_dict)
+            self._outer._dict['resources'].append(self._res_dict)
+
+
+class Resource(DictWrapper):
+    '''
+    Wrapper around a CKAN resource dict.
+
+    Do not instantiate directly, use ``Package.sync_resource`` instead.
+    '''
+    def __init__(self, pkg, res_dict):
+        super(Resource, self).__init__(res_dict)
+        self._pkg = pkg
+
+    @lib.nested_cm_method
+    class sync_view(object):
+        # Currently there is no way to attach extras to views (see
+        # https://github.com/ckan/ckan/issues/2655), so we cannot
+        # simply store the view's EID in the view itself. Instead,
+        # we store that information in a separate resource extra.
+        def __init__(self, eid):
+            self._eid = eid
+
+            views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
+            try:
+                view_id = views[eid]
+            except KeyError:
+                self._view_dict = self._outer._pkg._api.action.resource_view_create(
+                    resource_id=self._outer['id'],
+                    view_type='text_view',
+                    title='ckanext-importer default title',
+                )
+                views[eid] = self._view_dict['id']
+                self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+                print('Created view {} for EID {}'.format(self._view_dict['id'], eid))
+            else:
+                self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
+                print('Using existing view {} for EID {}'.format(view_id, eid))
+
+        def __enter__(self):
+            return self._view_dict
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is not None:
+                print('Exception during synchronization of view {} (EID {}): {}'.format(
+                    self._view_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that view.')
+                return
+            print('Uploading updated version of view {} (EID {})'.format(self._view_dict['id'], self._eid))
+            self._view_dict = self._outer._pkg._api.action.resource_view_update(**self._view_dict)
 
 
 class ExtrasDictView(collections.MutableMapping):
@@ -216,7 +270,6 @@ class ExtrasDictView(collections.MutableMapping):
         return (extra['key'] for extra in self._extras)
 
 
-
 if __name__ == '__main__':
     import io
     import json
@@ -238,4 +291,12 @@ if __name__ == '__main__':
                 res_counter = int(res.get('counter', 0))
                 print('resource counter = {!r}'.format(res_counter))
                 res['counter'] = res_counter + 1
+
+                with res.sync_view('veid1') as view:
+                    try:
+                        counter = int(view['title'])
+                    except ValueError:
+                        counter = 0
+                    print('view counter = {!r}'.format(counter))
+                    view['title'] = counter + 1
 
