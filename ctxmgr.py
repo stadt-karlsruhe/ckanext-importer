@@ -8,7 +8,7 @@ import collections
 import lib
 
 
-_PACKAGE_NAME_PREFIX = 'ckanext-importer-'
+_PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
@@ -39,8 +39,8 @@ class Importer(object):
             return lib.find_pkgs_by_extras(
                 self._outer._api,
                 {
-                    'ckanext-importer-importer-id': lib.solr_escape(self._outer.id),
-                    'ckanext-importer-package-eid': lib.solr_escape(self._eid),
+                    'ckanext_importer_importer_id': lib.solr_escape(self._outer.id),
+                    'ckanext_importer_package_eid': lib.solr_escape(self._eid),
                 },
             )
 
@@ -50,16 +50,16 @@ class Importer(object):
                 _PACKAGE_NAME_PREFIX,
                 owner_org=self._outer.default_owner_org,
                 extras=[
-                    {'key': 'ckanext-importer-importer-id',
+                    {'key': 'ckanext_importer_importer_id',
                      'value': self._outer.id},
-                    {'key': 'ckanext-importer-package-eid',
+                    {'key': 'ckanext_importer_package_eid',
                      'value': self._eid},
                 ],
             )
 
         def __enter__(self):
             #print('sync_package.__enter__')
-            self._package = Package(self._pkg_dict)
+            self._package = Package(self._outer._api, self._pkg_dict)
             return self._package
 
         def __exit__(self, exc_type, exc_val, exc_tb):
@@ -70,14 +70,18 @@ class Importer(object):
                 print('Not synchronizing that package.')
                 return
             print('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
-            api.action.package_update(**self._pkg_dict)
+            self._package._upload()
 
 
 class Package(collections.MutableMapping):
     '''
     Wrapper around a CKAN package dict.
+
+    Not to be instantiated directly. Use ``Importer.sync_package``
+    instead.
     '''
-    def __init__(self, pkg_dict):
+    def __init__(self, api, pkg_dict):
+        self._api = api
         self._pkg_dict = pkg_dict
         self.extras = ExtrasDictView(pkg_dict['extras'])
 
@@ -98,6 +102,71 @@ class Package(collections.MutableMapping):
 
     def __repr__(self):
         return '<{} {}>'.format(self.__class__.__name__, self['id'])
+
+    def _upload(self):
+        '''
+        Upload package dict to CKAN.
+        '''
+        self._api.action.package_update(**self._pkg_dict)
+
+    @lib.nested_cm_method
+    class sync_resource(object):
+        def __init__(self, eid):
+            self._eid = eid
+            res_dicts = self._find_res()
+            if not res_dicts:
+                self._create_res()
+                print('Created new resource {} for EID {}'.format(self._res_dict['id'], eid))
+            elif len(res_dicts) > 1:
+                raise ValueError('Multiple resources for EID {}'.format(eid))
+            else:
+                self._res_dict = res_dicts[0]
+                print('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
+
+        def _find_res(self):
+            return [res_dict for res_dict in self._outer._pkg_dict['resources']
+                    if res_dict['ckanext_importer_resource_eid'] == self._eid]
+
+        def _create_res(self):
+            self._res_dict = self._outer._api.action.resource_create(
+                package_id=self._outer['id'],
+                ckanext_importer_resource_eid=self._eid,
+            )
+            self._propagate_changes()
+
+        def __enter__(self):
+            print('sync_resource.__enter__')
+            return self._res_dict
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            print('sync_resource.__exit__')
+            if exc_type is not None:
+                print('Exception during synchronization of resource {} (EID {}): {}'.format(
+                    self._res_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that resource.')
+                return
+            print('Uploading updated version of resource {} (EID {})'.format(self._res_dict['id'], self._eid))
+            # TODO: Perhaps we should only store the changes in the cached pkg dict
+            #       and then upload only once (the whole package)? As long as we're
+            #       not doing file uploads that should work.
+            self._upload()
+
+        def _upload(self):
+            self._res_dict = self._outer._api.action.resource_update(**self._res_dict)
+            self._propagate_changes()
+
+        def _propagate_changes(self):
+            '''
+            Propagate changes in the cached resource dict to the cached package dict.
+            '''
+            for res_dict in self._outer._pkg_dict['resources']:
+                if res_dict['id'] == self._res_dict['id']:
+                    # Update existing cached resource
+                    res_dict.clear()
+                    res_dict.update(self._res_dict)
+                    return
+            # Append new cached resource
+            self._outer._pkg_dict['resources'].append(self._res_dict)
 
 
 class ExtrasDictView(collections.MutableMapping):
@@ -160,8 +229,13 @@ if __name__ == '__main__':
 
     with RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
         imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
-        with imp.sync_package('eid1') as pkg:
-            counter = int(pkg.extras.get('counter', 0))
-            print('Counter = {!r}'.format(counter))
-            pkg.extras['counter'] = counter + 1
+        with imp.sync_package('peid1') as pkg:
+            pkg_counter = int(pkg.extras.get('counter', 0))
+            print('package counter = {!r}'.format(pkg_counter))
+            pkg.extras['counter'] = pkg_counter + 1
+
+            with pkg.sync_resource('reid1') as res:
+                res_counter = int(res.get('counter', 0))
+                print('resource counter = {!r}'.format(res_counter))
+                res['counter'] = res_counter + 1
 
