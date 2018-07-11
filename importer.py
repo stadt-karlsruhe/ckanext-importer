@@ -1,287 +1,337 @@
 #!/usr/bin/env python2
 
-import copy
-import hashlib
-from itertools import izip_longest
-import logging
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import collections
+import json
 import re
 
-import jsondiff
 
-from lib import solr_escape
+_SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
 
-
-log = logging.getLogger(__name__)
-
-
-def _get_extra(pkg, key):
+def _solr_escape(s):
     '''
-    Get the value of a package extra.
+    Escape strings for Solr queries.
     '''
-    for extra in pkg['extras']:
-        if extra['key'] == key:
-            return extra['value']
-    raise KeyError(key)
+    return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
 
 
-def _set_extra(pkg, key, value):
-    '''
-    Set the value of a package extra.
+# Idea for starting a context manager on a method call:
+#
+# - Only a class can implement the CM protocol (using its __enter__ and
+#   __exit__ methods), so accessing (not calling!) the target method must
+#  return a suitable class.
+#
+# - That can be achieved using a descriptor class (that provides __get__ and
+#   __set__ methods).
+#
+# - The nested CM should have knowledge of the outer CM. This is achieved
+#   by wrapping the inner CM class in a function that creates an instance of
+#   the inner class and then sets an appropriate attribute on it.
+#
+# - Finally we use a class for the wrapping, so that we can provide a
+#   meaningful `repr`.
+class _nested_cm_method(object):
 
-    If there is an existing extra with the given key its value is
-    replaced. Otherwise, a new extra is appended at the end of the
-    extras list.
-    '''
-    extras = pkg.setdefault('extras', [])
-    for extra in extras:
-        if extra['key'] == key:
-            extra['value'] = value
-            return
-    extras.append({'key': key, 'value': value})
+    def __init__(self, cls):
+        self._cls = cls
+
+    def __get__(self, obj, type=None):
+
+        class NestedCM(object):
+            __name__ = self._cls.__name__
+            __doc__ = self._cls.__doc__
+
+            def __call__(_, *args, **kwargs):
+                instance = self._cls.__new__(self._cls)
+                instance._outer = obj
+                instance.__init__(*args, **kwargs)
+                return instance
+
+            def __repr__(_):
+                return '<nested context manager method {}.{} of {}>'.format(
+                    obj.__class__.__name__,
+                    self._cls.__name__,
+                    obj,
+                )
+
+        return NestedCM()
+
+    def __set__(self, obj, value):
+        raise AttributeError('Read-only attribute')
 
 
-def file_hash(filename, cls=hashlib.sha1, block_size=65536):
-    '''
-    Compute the hash of a file on disk.
-    '''
-    with open(filename, 'rb') as f:
-        hasher = cls()
-        for block in iter(lambda: f.read(block_size), b''):
-            hasher.update(block)
-    return hasher.hexdigest()
-
-
-def _update_dict(d1, d2, exclude=None):
-    '''
-    Update one dict with items from another one.
-
-    Puts all items of ``d2`` into ``d1`` (in-place).
-
-    ``exclude`` can be a list of keys in ``d2`` which are ignored.
-    '''
-    exclude = exclude or []
-    d1.update((key, value) for key, value in d2.items() if key not in exclude)
-
+_PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
-    def __init__(self, id, api):
-        '''
-        ``id``: ID-string of the importer. Used to identify which
-        existing datasets belong to the importer.
-        '''
+    def __init__(self, api, id, default_owner_org):
+        self._api = api
         self.id = id
-        self.api = api
+        self.default_owner_org = default_owner_org
 
-    def _upload_resource_file(self, filename, res):
+    @_nested_cm_method
+    class sync_package(object):
         '''
-        Upload a file as a resource's data.
-
-        ``filename`` is the name of the file.
-
-        ``res`` is the resource dict.
-
-        The resource must already exist.
+        Synchronize a package.
         '''
-        res = copy.deepcopy(res)
-        with open(filename, 'rb') as f:
-            res.setdefault('url', 'unused-but-required')
-            return self._call_action('resource_update', res, files={'upload': f})
+        def __init__(self, eid):
+            #print('sync_package.__init__')
+            self._eid = eid
+            pkg_dicts = self._find_pkgs()
+            if not pkg_dicts:
+                self._pkg_dict = self._create_pkg()
+                print('Created package {} for EID {}'.format(self._pkg_dict['id'], eid))
+            elif len(pkg_dicts) > 1:
+                raise ValueError('Multiple packages for EID {}'.format(eid))
+            else:
+                self._pkg_dict = pkg_dicts[0]
+                print('Using existing package {} for EID {}'.format(self._pkg_dict['id'], eid))
 
-    def _call_action(self, method_name, data, **kwargs):
-        return self.api.call_action(method_name, data, **kwargs)
+        def _find_pkgs(self):
+            extras = {
+                'ckanext_importer_importer_id': _solr_escape(self._outer.id),
+                'ckanext_importer_package_eid': _solr_escape(self._eid),
+            }
+            fq = ' AND '.join('extras_{}:"{}"'.format(*item)
+                              for item in extras.items())
+            # FIXME: Support for paging
+            result = self._outer._api.action.package_search(fq=fq, rows=1000)
+            return result['results']
 
-    def sync(self, master):
+        def _create_pkg(self):
+            i = 0
+            while True:
+                name = '{}{}'.format(_PACKAGE_NAME_PREFIX, i)
+                try:
+                    return self._outer._api.action.package_create(
+                        name=name,
+                        owner_org=self._outer.default_owner_org,
+                        extras=[
+                            {'key': 'ckanext_importer_importer_id',
+                             'value': self._outer.id},
+                            {'key': 'ckanext_importer_package_eid',
+                             'value': self._eid},
+                        ],
+                    )
+                except ckanapi.ValidationError as e:
+                    if 'name' in e.error_dict:
+                        # Duplicate name
+                        i += 1
+                        continue
+                    raise
+
+        def __enter__(self):
+            #print('sync_package.__enter__')
+            self._package = Package(self._outer._api, self._pkg_dict)
+            return self._package
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            #print('sync_package.__exit__')
+            if exc_type is not None:
+                print('Exception during synchronization of package {} (EID {}): {}'.format(
+                    self._pkg_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that package.')
+                return
+            print('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
+            self._package._upload()
+
+
+class DictWrapper(collections.MutableMapping):
+    def __init__(self, d):
+        self._dict = d
+
+    def __getitem__(self, key):
+        return self._dict[key]
+
+    def __setitem__(self, key, value):
+        self._dict[key] = value
+
+    def __delitem__(self, key):
+        del self._dict[key]
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __len__(self):
+        return len(self._dict)
+
+
+class Package(DictWrapper):
+    '''
+    Wrapper around a CKAN package dict.
+
+    Not to be instantiated directly. Use ``Importer.sync_package``
+    instead.
+    '''
+    def __init__(self, api, pkg_dict):
+        super(Package, self).__init__(pkg_dict)
+        self._api = api
+        self.extras = ExtrasDictView(pkg_dict['extras'])
+
+    def __repr__(self):
+        return '<{} {}>'.format(self.__class__.__name__, self['id'])
+
+    def _upload(self):
         '''
-        ``master`` is a list of dataset descriptions.
+        Upload package dict to CKAN.
         '''
-        master_pkgs = {pkg['name']: pkg for pkg in self._check_master(master)}
+        self._api.action.package_update(**self._dict)
 
-        # Find all existing datasets that belong to the importer
-        existing_pkgs = self._find_pkgs_by_extra('ckanext_importer_importer_id', solr_escape(self.id))
-        log.debug('Found {} existing package(s)'.format(len(existing_pkgs)))
-        #log.debug([pkg['name'] for pkg in existing_pkgs])
+    @_nested_cm_method
+    class sync_resource(object):
+        def __init__(self, eid):
+            self._eid = eid
+            res_dicts = self._find_res()
+            if not res_dicts:
+                self._create_res()
+                print('Created new resource {} for EID {}'.format(self._res_dict['id'], eid))
+            elif len(res_dicts) > 1:
+                raise ValueError('Multiple resources for EID {}'.format(eid))
+            else:
+                self._res_dict = res_dicts[0]
+                print('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
 
-        # For each existing dataset: if it has a master, update it, otherwise remove it
-        for existing_pkg in existing_pkgs:
+        def _find_res(self):
+            return [res_dict for res_dict in self._outer._dict['resources']
+                    if res_dict['ckanext_importer_resource_eid'] == self._eid]
+
+        def _create_res(self):
+            self._res_dict = self._outer._api.action.resource_create(
+                package_id=self._outer['id'],
+                ckanext_importer_resource_eid=self._eid,
+            )
+            self._propagate_changes()
+
+        def __enter__(self):
+            #print('sync_resource.__enter__')
+            return Resource(self._outer, self._res_dict)
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            #print('sync_resource.__exit__')
+            if exc_type is not None:
+                print('Exception during synchronization of resource {} (EID {}): {}'.format(
+                    self._res_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that resource.')
+                return
+            print('Uploading updated version of resource {} (EID {})'.format(self._res_dict['id'], self._eid))
+            # TODO: Perhaps we should only store the changes in the cached pkg dict
+            #       and then upload only once (the whole package)? As long as we're
+            #       not doing file uploads that should work.
+            self._upload()
+
+        def _upload(self):
+            self._res_dict = self._outer._api.action.resource_update(**self._res_dict)
+            self._propagate_changes()
+
+        def _propagate_changes(self):
+            '''
+            Propagate changes in the cached resource dict to the cached package dict.
+            '''
+            for res_dict in self._outer._dict['resources']:
+                if res_dict['id'] == self._res_dict['id']:
+                    # Update existing cached resource
+                    res_dict.clear()
+                    res_dict.update(self._res_dict)
+                    return
+            # Append new cached resource
+            self._outer._dict['resources'].append(self._res_dict)
+
+
+class Resource(DictWrapper):
+    '''
+    Wrapper around a CKAN resource dict.
+
+    Do not instantiate directly, use ``Package.sync_resource`` instead.
+    '''
+    def __init__(self, pkg, res_dict):
+        super(Resource, self).__init__(res_dict)
+        self._pkg = pkg
+
+    @_nested_cm_method
+    class sync_view(object):
+        # Currently there is no way to attach extras to views (see
+        # https://github.com/ckan/ckan/issues/2655), so we cannot
+        # simply store the view's EID in the view itself. Instead,
+        # we store that information in a separate resource extra.
+        def __init__(self, eid):
+            self._eid = eid
+
+            views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
             try:
-                master_pkg = master_pkgs.pop(existing_pkg['name'])
+                view_id = views[eid]
             except KeyError:
-                self._purge_pkg(existing_pkg)
-                continue
-            self._sync_pkg(existing_pkg, master_pkg)
-
-        # For the remaining master datasets: create real datasets
-        for master_pkg in master_pkgs.values():
-            self._create_pkg(master_pkg)
-
-    def _check_master(self, master):
-        with_name = [pkg for pkg in master if 'name' in pkg]
-        if len(with_name) != len(master):
-            log.warning('Ignoring {} dataset(s) without "name" attribute'.format(len(master) - len(with_name)))
-        with_org = []
-        for pkg in with_name:
-            if 'owner_org' in pkg:
-                with_org.append(pkg)
+                self._view_dict = self._outer._pkg._api.action.resource_view_create(
+                    resource_id=self._outer['id'],
+                    view_type='text_view',
+                    title='ckanext-importer default title',
+                )
+                views[eid] = self._view_dict['id']
+                self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+                print('Created view {} for EID {}'.format(self._view_dict['id'], eid))
             else:
-                log.warning('Ignoring master "{}" because it has no "owner_org" attribute'.format(pkg['name']))
-        return with_org
+                self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
+                print('Using existing view {} for EID {}'.format(view_id, eid))
 
-    def _sync_pkg(self, existing, master):
+        def __enter__(self):
+            return self._view_dict
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is not None:
+                print('Exception during synchronization of view {} (EID {}): {}'.format(
+                    self._view_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that view.')
+                return
+            print('Uploading updated version of view {} (EID {})'.format(self._view_dict['id'], self._eid))
+            self._view_dict = self._outer._pkg._api.action.resource_view_update(**self._view_dict)
+
+
+class ExtrasDictView(collections.MutableMapping):
+    '''
+    Wrapper around a CKAN package's "extras".
+    '''
+    def __init__(self, extras):
         '''
-        Synch a single dataset.
+        Constructor.
 
-        ``existing`` is the package dict of an existing dataset.
-
-        ``master`` is the description for that dataset.
+        ``extras`` is a list of package extras. That list is managed
+        in-place by the created ``ExtrasDictView`` instance.
         '''
-        name = master['name']
-        log.info('Synchronizing dataset {}'.format(name))
+        self._extras = extras
 
-        updated = copy.deepcopy(existing)
-        _update_dict(updated, master, exclude={'owner_org', 'resources'})
+    def __getitem__(self, key):
+        for extra in self._extras:
+            if extra['key'] == key:
+                return extra['value']
+        raise KeyError(key)
 
-        # Make sure the importer ID is listed in the extras, it might
-        # have been overwritten if the master supplied its own extras.
-        _set_extra(updated, 'ckanext_importer_importer_id', self.id)
-        # CKAN sorts extras by their key, so we need to also do that.
-        # Otherwise the difference check further down returns false
-        # positives.
-        updated['extras'].sort(key=lambda extra: extra['key'])
-
-        org = updated['organization']
-        if master['owner_org'] not in (org['id'], org['name']):
-            log.debug('Organisation of dataset {} changed'.format(name))
-            del updated['organization']
-            updated['owner_org'] = master['owner_org']
-
-        file_uploads = self._update_resources(updated, master)
-
-        if existing != updated:
-            log.debug('Dataset {} has changed'.format(name))
-            log.debug(jsondiff.diff(existing, updated))
-            #log.debug(existing)
-            #log.debug(updated)
-            updated = self._call_action('package_update', updated)
-        else:
-            log.debug('Dataset {} has not changed'.format(name))
-
-        self._upload_files(updated, file_uploads)
-
-    def _update_resources(self, pkg, master):
+    def __setitem__(self, key, value):
         '''
-        Update resources in a package according to a master.
+        Set the value of a package extra.
 
-        ``pkg`` is a package dict and ``master`` is a package master.
-
-        Returns a list of files that need to be uploaded as a dict which
-        maps resource indices to filenames.
+        If there is an existing extra with the given key its value is
+        replaced. Otherwise, a new extra is appended at the end of the
+        extras list.
         '''
-        name = master['name']
-        resources = pkg.get('resources', [])
-        master_resources = master.get('resources', [])
-        updated_resources = []
-        file_uploads = {}
+        for extra in self._extras:
+            if extra['key'] == key:
+                extra['value'] = value
+                return
+        self._extras.append({'key': key, 'value': value})
 
-        for res_num, (res, master_res) in enumerate(izip_longest(resources, master_resources)):
-            if res is None:
-                # Additional resources in master
-                log.debug('Additional resource #{} in master for dataset {}'.format(res_num, name))
-                new_res = {}
-                _update_dict(new_res, master_res, exclude={'_file'})
-                if '_file' in master_res:
-                    filename = master_res['_file']
-                    file_uploads[res_num] = filename
-                    new_res.setdefault('url', 'unused-but-required')
-                    new_res['ckanext_importer_file_sha1'] = file_hash(filename)
-                updated_resources.append(new_res)
-            elif master_res is None:
-                # Resources have been removed in master
-                log.debug('Removing resource #{} from dataset {} because it is missing from master'.format(
-                          res_num, name))
-                pass
-            else:
-                updated_res = copy.deepcopy(res)
-                _update_dict(updated_res, master_res, exclude={'_file'})
-                if '_file' in master_res:
-                    filename = master_res['_file']
-                    new_hash = file_hash(filename)
-                    if new_hash != updated_res.get('ckanext_importer_file_sha1'):
-                        log.debug('File content of resource #{} of dataset {} has changed'.format(res_num, name))
-                        file_uploads[res_num] = filename
-                        updated_res['ckanext_importer_file_sha1'] = new_hash
-                if updated_res != res:
-                    log.debug('Resource #{} of dataset {} has changed'.format(res_num, name))
-                updated_resources.append(updated_res)
+    def __delitem__(self, key):
+        for i, extra in enumerate(self._extras):
+            if extra['key'] == key:
+                self._extras.pop(i)
+                return
+        raise KeyError(key)
 
-        pkg['resources'] = updated_resources
+    def __len__(self):
+        return len(self._extras)
 
-        return file_uploads
-
-    def _upload_files(self, pkg, file_uploads):
-        '''
-        Upload files to resources of a package.
-
-        ``pkg`` is a package dict.
-
-        ``file_uploads`` is a dict that maps resource indices to filenames.
-        '''
-        for res_num, filename in file_uploads.items():
-            log.debug('Uploading file "{}" to resource #{} of dataset {}'.format(filename, res_num, pkg['name']))
-            # We need to make sure to use the package dict returned by CKAN after a potential
-            # update here, because resource masters don't have their `id` and `package_id` set.
-            self._upload_resource_file(filename, pkg['resources'][res_num])
-
-    def _create_pkg(self, master):
-        '''
-        Create a single dataset.
-
-        ``master`` is the description for that dataset.
-
-        CKAN errors are logged and swallowed.
-        '''
-        name = master['name']
-        log.info('Creating new dataset {}'.format(name))
-
-        new_pkg = {}
-        _update_dict(new_pkg, copy.deepcopy(master), exclude={'resources'})
-
-        _set_extra(new_pkg, 'ckanext_importer_importer_id', self.id)
-
-        file_uploads = self._update_resources(new_pkg, master)
-
-        try:
-            new_pkg = self._call_action('package_create', new_pkg)
-        except Exception as e:
-            log.error('Error while creating new dataset {}: {}'.format(name, e))
-            return
-
-        self._upload_files(new_pkg, file_uploads)
-
-    def _purge_pkg(self, existing):
-        '''
-        Purge an existing CKAN dataset.
-
-        ``existing`` is the package dict.
-        '''
-        log.info('Purging dataset {}'.format(existing['name']))
-        self._call_action('dataset_purge', {'id': existing['id']})
-
-    def _find_pkgs_by_extra(self, key, value='*'):
-        '''
-        Find CKAN packages with a certain "extra" field.
-
-        ``key`` is the name of the extra field.
-
-        ``value`` is the (string) value to look for. Note that you might
-        need to escape Solr special characters (if you don't want them
-        to be interpreted specially). See ``solr_escape``.
-
-        Returns a list of package dicts.
-        '''
-        fq = 'extras_{key}:"{value}"'.format(key=key, value=value)
-        # FIXME: Support for paging
-        return self._call_action('package_search', {'fq':fq, 'rows': '1000'})['results']
+    def __iter__(self):
+        return (extra['key'] for extra in self._extras)
 
 
 if __name__ == '__main__':
@@ -290,60 +340,33 @@ if __name__ == '__main__':
 
     from ckanapi import RemoteCKAN
 
-    log.addHandler(logging.StreamHandler())
-    log.setLevel(logging.DEBUG)
-
-    master = [
-        {
-            'title': 'No name to test the warning',
-        },
-        {
-            'name': 'no-owner_org-to-test-the-warning',
-        },
-        {
-            'name': 'a-first-test',
-            'owner_org': 'stadt-karlsruhe',
-            'title': 'We have a title!',
-        },
-        {
-            'name': 'a-test-with-extras',
-            'extras': [
-                {'key': 'something', 'value': 'special?'},
-            ],
-            'owner_org': 'stadt-karlsruhe',
-        },
-        {
-            'name': 'a-test-with-an-organization-id-instead-of-name',
-            'owner_org': '12d5f4e4-036e-49de-84ef-5a8d617a3f9b',
-        },
-        {
-            'name': 'a-test-with-resources',
-            'owner_org': 'stadt-karlsruhe',
-            'resources': [
-                {
-                    'name': 'A new name',
-                    'url': 'https://some-url2',
-                },
-                {
-                    'url': 'https://a-url',
-                },
-            ],
-        },
-        {
-            'name': 'a-resource-with-a-file-upload',
-            'owner_org': 'stadt-karlsruhe',
-            'resources': [
-                {
-                    '_file': 'test1.csv',
-                },
-            ],
-        }
-    ]
 
     with io.open('apikey.json', 'r', encoding='utf-8') as f:
         apikey = json.load(f)['apikey']
 
     with RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
-        importer = Importer('test-importer-01', api)
-        importer.sync(master)
+        imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
+        with imp.sync_package('peid1') as pkg:
+            pkg_counter = int(pkg.extras.get('counter', 0))
+            print('package counter = {!r}'.format(pkg_counter))
+            pkg.extras['counter'] = pkg_counter + 1
+
+            with io.open('test.csv', 'r', encoding='utf-8') as upload:
+
+                with pkg.sync_resource('reid1') as res:
+                    res_counter = int(res.get('counter', 0))
+                    print('resource counter = {!r}'.format(res_counter))
+                    res['counter'] = res_counter + 1
+
+                    # File upload
+                    print('resource url = {!r}'.format(res['url']))
+                    res['upload'] = upload
+
+                    with res.sync_view('veid1') as view:
+                        try:
+                            counter = int(view['title'])
+                        except ValueError:
+                            counter = 0
+                        print('view counter = {!r}'.format(counter))
+                        view['title'] = counter + 1
 
