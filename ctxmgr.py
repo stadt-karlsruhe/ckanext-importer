@@ -23,27 +23,11 @@ class Importer(object):
         Synchronize a package.
         '''
         def __init__(self, eid):
-            print('SyncPackage.__init__')
-
-            pkg_dicts = lib.find_pkgs_by_extras(
-                self._outer._api,
-                {
-                    'ckanext-importer-importer-id': lib.solr_escape(self._outer.id),
-                    'ckanext-importer-package-eid': lib.solr_escape(eid),
-                },
-            )
+            #print('sync_package.__init__')
+            self._eid = eid
+            pkg_dicts = self._find_pkgs()
             if not pkg_dicts:
-                self._pkg_dict = lib.create_package(
-                    self._outer._api,
-                    _PACKAGE_NAME_PREFIX,
-                    owner_org=self._outer.default_owner_org,
-                    extras=[
-                        {'key': 'ckanext-importer-importer-id',
-                         'value': self._outer.id},
-                        {'key': 'ckanext-importer-package-eid',
-                         'value': eid},
-                    ],
-                )
+                self._pkg_dict = self._create_pkg()
                 print('Created package {} for EID {}'.format(self._pkg_dict['id'], eid))
             elif len(pkg_dicts) > 1:
                 raise ValueError('Multiple packages for EID {}'.format(eid))
@@ -51,13 +35,42 @@ class Importer(object):
                 self._pkg_dict = pkg_dicts[0]
                 print('Using existing package {} for EID {}'.format(self._pkg_dict['id'], eid))
 
+        def _find_pkgs(self):
+            return lib.find_pkgs_by_extras(
+                self._outer._api,
+                {
+                    'ckanext-importer-importer-id': lib.solr_escape(self._outer.id),
+                    'ckanext-importer-package-eid': lib.solr_escape(self._eid),
+                },
+            )
+
+        def _create_pkg(self):
+            return lib.create_package(
+                self._outer._api,
+                _PACKAGE_NAME_PREFIX,
+                owner_org=self._outer.default_owner_org,
+                extras=[
+                    {'key': 'ckanext-importer-importer-id',
+                     'value': self._outer.id},
+                    {'key': 'ckanext-importer-package-eid',
+                     'value': self._eid},
+                ],
+            )
 
         def __enter__(self):
-            print('SyncPackage.__enter__')
-            return Package(self._pkg_dict)
+            #print('sync_package.__enter__')
+            self._package = Package(self._pkg_dict)
+            return self._package
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            print('SyncPackage.__exit__')
+            #print('sync_package.__exit__')
+            if exc_type is not None:
+                print('Exception during synchronization of package {} (EID {}): {}'.format(
+                    self._pkg_dict['id'], self._eid, exc_val))
+                print('Not synchronizing that package.')
+                return
+            print('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
+            api.action.package_update(**self._pkg_dict)
 
 
 class Package(collections.MutableMapping):
@@ -148,7 +161,7 @@ if __name__ == '__main__':
     with RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
         imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
         with imp.sync_package('eid1') as pkg:
-            print('Package extras:')
-            for extra in pkg.extras:
-                print('  {}'.format(extra))
+            counter = int(pkg.extras.get('counter', 0))
+            print('Counter = {!r}'.format(counter))
+            pkg.extras['counter'] = counter + 1
 
