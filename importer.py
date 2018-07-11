@@ -7,6 +7,8 @@ import collections
 import json
 import re
 
+import ckanapi
+
 
 _SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
 
@@ -338,13 +340,11 @@ if __name__ == '__main__':
     import io
     import json
 
-    from ckanapi import RemoteCKAN
-
 
     with io.open('apikey.json', 'r', encoding='utf-8') as f:
         apikey = json.load(f)['apikey']
 
-    with RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
+    with ckanapi.RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
         imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
         with imp.sync_package('peid1') as pkg:
             pkg_counter = int(pkg.extras.get('counter', 0))
