@@ -8,18 +8,10 @@ import re
 
 import jsondiff
 
+from lib import solr_escape
+
 
 log = logging.getLogger(__name__)
-
-
-_SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
-
-
-def solr_escape(s):
-    '''
-    Escape strings for Solr queries.
-    '''
-    return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
 
 
 def _get_extra(pkg, key):
@@ -69,9 +61,6 @@ def _update_dict(d1, d2, exclude=None):
     '''
     exclude = exclude or []
     d1.update((key, value) for key, value in d2.items() if key not in exclude)
-
-
-
 
 
 class Importer(object):

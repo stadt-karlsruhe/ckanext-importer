@@ -3,146 +3,96 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+import collections
+
+import lib
 
 
-
-class Manager(object):
-
-    def __init__(self, *args, **kwargs):
-        print('Manager.init')
-        print('  args = {}'.format(args))
-        print('  kwargs = {}'.format(kwargs))
-
-    def __enter__(self):
-        print('Manager.__enter__')
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        print('Manager.__exit__')
-        print('  exc_type = {}'.format(exc_type))
-        print('  exc_val = {}'.format(exc_val))
-        print('  exc_tb = {}'.format(exc_tb))
-
-        if exc_type is not None:
-            # An exception occurred
-            print('An exception occurred')
-            print('Swallowing that exception')
-            return True  # Swallow exception
-
-
-# Idea for starting a context manager on a method call:
-#
-# - Only a class can implement the CM protocol (using its __enter__ and
-#   __exit__ methods), so accessing (not calling!) the target method must
-#  return a suitable class.
-#
-# - That can be achieved using a descriptor class (that provides __get__ and
-#   __set__ methods).
-#
-# - The nested CM should have knowledge of the outer CM. This is achieved
-#   by wrapping the inner CM class in a function that creates an instance of
-#   the inner class and then sets an appropriate attribute on it.
-#
-# - Finally we use a class for the wrapping, so that we can provide a
-#   meaningful `repr`.
-
-
-class nested_cm_method(object):
-
-    def __init__(self, cls):
-        self._cls = cls
-
-    def __get__(self, obj, type=None):
-
-        class NestedCM(object):
-            __name__ = self._cls.__name__
-            __doc__ = self._cls.__doc__
-
-            def __call__(_, *args, **kwargs):
-                instance = self._cls.__new__(self._cls)
-                instance._outer = obj
-                instance.__init__(*args, **kwargs)
-                return instance
-
-            def __repr__(_):
-                return '<nested context manager method {}.{} of {}>'.format(
-                    obj.__class__.__name__,
-                    self._cls.__name__,
-                    obj,
-                )
-
-        return NestedCM()
-
-    def __set__(self, obj, value):
-        raise AttributeError('Read-only attribute')
-
+_PACKAGE_NAME_PREFIX = 'ckanext-importer-'
 
 class Importer(object):
 
-    def __init__(self, id):
+    def __init__(self, api, id, default_owner_org):
+        self._api = api
         self.id = id
-        self._synced_pkg_ids = []
-        self._active = False
+        self.default_owner_org = default_owner_org
 
-    def __enter__(self):
-        self._active = True
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._active = False
-        if exc_type is not None:
-            print('An exception occurred during package synchronization')
-            print('Not removing existing packages')
-            print('But swallowing the exception (after logging it)')
-            print(exc_val)
-            return
-        print('Removing all existing but unsynced packages')
-        existing_pkg_ids = set(self._get_existing_pkgs().values())
-        unsynced_pkg_ids = existing_pkg_ids.difference(self._synced_pkg_ids)
-        for pkg_id in unsynced_pkg_ids:
-            print('Removing existing but unsynced package "{}"'.format(pkg_id))
-
-    def _get_existing_pkgs(self):
-        '''
-        Get the existing CKAN packages for this importer.
-
-        Finds all existing CKAN packages belonging to this importer
-        (based on the importer ID). Returns a dict that maps their
-        master ID to their CKAN ID.
-
-        Packages that have an importer ID but no master ID are removed
-        from CKAN.
-        '''
-        return {}
-
-    @nested_cm_method
+    @lib.nested_cm_method
     class sync_package(object):
         '''
-        This docstring is passed on to the method
+        Synchronize a package.
         '''
-        def __init__(self, *args, **kwargs):
+        def __init__(self, eid):
             print('SyncPackage.__init__')
-            print('  args = {}'.format(args))
-            print('  kwargs = {}'.format(kwargs))
-            print('  _outer = {}'.format(self._outer))
+
+            pkg_dicts = lib.find_pkgs_by_extras(
+                self._outer._api,
+                {
+                    'ckanext-importer-importer-id': lib.solr_escape(self._outer.id),
+                    'ckanext-importer-package-eid': lib.solr_escape(eid),
+                },
+            )
+            print('Packages for EID {}: {}'.format(eid, pkg_dicts))
+            if not pkg_dicts:
+                pkg_dict = lib.create_package(
+                    self._outer._api,
+                    _PACKAGE_NAME_PREFIX,
+                    owner_org=self._outer.default_owner_org,
+                    extras=[
+                        {'key': 'ckanext-importer-importer-id',
+                         'value': self._outer.id},
+                        {'key': 'ckanext-importer-package-eid',
+                         'value': eid},
+                    ],
+                )
+                print('Created package {} for EID {}'.format(pkg_dict['id'], eid))
+            elif len(pkg_dicts) > 1:
+                raise ValueError('Multiple packages for EID {}'.format(eid))
+            else:
+                pkg_dict = pkg_dicts[0]
 
         def __enter__(self):
             print('SyncPackage.__enter__')
-            return self
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             print('SyncPackage.__exit__')
 
 
+#class Package(collections.MutableMapping):
+#    '''
+#    Wrapper around a CKAN package dict.
+#    '''
+#    def __init__(self, pkg_dict):
+#        self._pkg_dict = pkg_dict
+#
+#    def __getitem__(self, key):
+#        return self._pkg_dict[key]
+#
+#    def __setitem__(self, key, value):
+#        self._pkg_dict[key] = value
+#
+#    def __delitem__(self, key):
+#        del self._pkg_dict[key]
+#
+#    def __iter__(self):
+#        return iter(self._pkg_dict)
+#
+#    def __len__(self):
+#        return len(self._pkg_dict)
+
+
 if __name__ == '__main__':
-    print('Before with')
-    with Manager('foo', bar='bar') as manager:
-        print('Begin of inside with')
-        print('manager = {}'.format(manager))
+    import io
+    import json
 
-        print('Before exception')
-        raise ValueError('Oh no!')
-        print('After exception')
+    from ckanapi import RemoteCKAN
 
-        print('End of inside with')
-    print('After with')
+
+    with io.open('apikey.json', 'r', encoding='utf-8') as f:
+        apikey = json.load(f)['apikey']
+
+    with RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
+        imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
+        with imp.sync_package('eid1') as pkg:
+            print('OK')
 
