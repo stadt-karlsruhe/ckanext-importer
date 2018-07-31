@@ -264,14 +264,14 @@ class Resource(DictWrapper):
             try:
                 view_id = views[eid]
             except KeyError:
-                self._view_dict = self._outer._pkg._api.action.resource_view_create(
-                    resource_id=self._outer['id'],
-                    view_type='text_view',
-                    title='ckanext-importer default title',
-                )
-                views[eid] = self._view_dict['id']
-                self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
-                print('Created view {} for EID {}'.format(self._view_dict['id'], eid))
+                # Ideally, we'd like to create a new view here (like we do for
+                # packages and resources). However, CKAN's resource_view_create
+                # requires us to fix the view's type, and resource_view_update
+                # doesn't allow us to alter it afterwards. Hence we return an
+                # empty dict here and do the creation when entering the context
+                # manager.
+                print('Delaying view creation for EID {}'.format(eid))
+                self._view_dict = {}
             else:
                 self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
                 print('Using existing view {} for EID {}'.format(view_id, eid))
@@ -280,13 +280,32 @@ class Resource(DictWrapper):
             return self._view_dict
 
         def __exit__(self, exc_type, exc_val, exc_tb):
+            view = self._view_dict
             if exc_type is not None:
-                print('Exception during synchronization of view {} (EID {}): {}'.format(
-                    self._view_dict['id'], self._eid, exc_val))
+                try:
+                    id = view['id']
+                except KeyError:
+                    print('Exception during synchronization of new view (EID {}): {}'.format(
+                          self._eid, exc_val))
+                else:
+                    print('Exception during synchronization of view {} (EID {}): {}'.format(
+                          id, self._eid, exc_val))
                 print('Not synchronizing that view.')
                 return
-            print('Uploading updated version of view {} (EID {})'.format(self._view_dict['id'], self._eid))
-            self._view_dict = self._outer._pkg._api.action.resource_view_update(**self._view_dict)
+            if 'id' in view:
+                print('Uploading updated version of view {} (EID {})'.format(view['id'], self._eid))
+                self._view_dict = self._outer._pkg._api.action.resource_view_update(**view)
+            else:
+                # Create the view
+                view['resource_id'] = self._outer['id']
+                self._view_dict = self._outer._pkg._api.action.resource_view_create(**view)
+
+                # Register it in the resource
+                views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
+                views[self._eid] = self._view_dict['id']
+                self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+
+                print('Created view {} for EID {}'.format(self._view_dict['id'], self._eid))
 
 
 class ExtrasDictView(collections.MutableMapping):
@@ -340,7 +359,6 @@ if __name__ == '__main__':
     import io
     import json
 
-
     with io.open('apikey.json', 'r', encoding='utf-8') as f:
         apikey = json.load(f)['apikey']
 
@@ -362,11 +380,10 @@ if __name__ == '__main__':
                     print('resource url = {!r}'.format(res['url']))
                     res['upload'] = upload
 
-                    with res.sync_view('veid1') as view:
-                        try:
-                            counter = int(view['title'])
-                        except ValueError:
-                            counter = 0
+                    with res.sync_view('veid2') as view:
+                        view['view_type'] = 'text_view'
+
+                        counter = int(view.get('title', 0))
                         print('view counter = {!r}'.format(counter))
                         view['title'] = counter + 1
 
