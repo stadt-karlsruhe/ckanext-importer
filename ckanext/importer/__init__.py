@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
@@ -10,7 +10,10 @@ import re
 import ckanapi
 
 
+__version__ = '0.1.0'
+
 _SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
+
 
 def _solr_escape(s):
     '''

@@ -3,5 +3,7 @@
 
 /apikey.json
 
+*.egg-info/
+
 .*.swp
 *.pyc
