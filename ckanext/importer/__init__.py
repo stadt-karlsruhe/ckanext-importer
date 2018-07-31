@@ -71,9 +71,9 @@ _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
-    def __init__(self, api, id, default_owner_org):
-        self._api = api
+    def __init__(self, id, api=None, default_owner_org=None):
         self.id = id
+        self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
 
     @_nested_cm_method
