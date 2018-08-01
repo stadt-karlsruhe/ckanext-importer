@@ -5,6 +5,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import collections
 import json
+import logging
 import re
 
 import ckanapi
@@ -13,6 +14,8 @@ import ckanapi
 __version__ = '0.1.0'
 
 _SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
+
+log = logging.getLogger(__name__)
 
 
 def _solr_escape(s):
@@ -82,17 +85,16 @@ class Importer(object):
         Synchronize a package.
         '''
         def __init__(self, eid):
-            #print('sync_package.__init__')
             self._eid = eid
             pkg_dicts = self._find_pkgs()
             if not pkg_dicts:
                 self._pkg_dict = self._create_pkg()
-                print('Created package {} for EID {}'.format(self._pkg_dict['id'], eid))
+                log.info('Created package {} for EID {}'.format(self._pkg_dict['id'], eid))
             elif len(pkg_dicts) > 1:
                 raise ValueError('Multiple packages for EID {}'.format(eid))
             else:
                 self._pkg_dict = pkg_dicts[0]
-                print('Using existing package {} for EID {}'.format(self._pkg_dict['id'], eid))
+                log.debug('Using existing package {} for EID {}'.format(self._pkg_dict['id'], eid))
 
         def _find_pkgs(self):
             extras = {
@@ -103,7 +105,20 @@ class Importer(object):
                               for item in extras.items())
             # FIXME: Support for paging
             result = self._outer._api.action.package_search(fq=fq, rows=1000)
-            return result['results']
+
+            # CKAN's search is based on Solr, which by default doesn't support
+            # searching for exact matches. Hence searching for importer ID "x"
+            # can also return packages with importer ID "x-y". Hence we filter
+            # the results again.
+            pkgs = []
+            for pkg in result['results']:
+                extras = ExtrasDictView(pkg['extras'])
+                if (extras['ckanext_importer_importer_id'] == self._outer.id and
+                    extras['ckanext_importer_package_eid'] == self._eid):
+                    pkgs.append(pkg)
+
+            return pkgs
+
 
         def _create_pkg(self):
             i = 0
@@ -128,18 +143,16 @@ class Importer(object):
                     raise
 
         def __enter__(self):
-            #print('sync_package.__enter__')
             self._package = Package(self._outer._api, self._pkg_dict)
             return self._package
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            #print('sync_package.__exit__')
             if exc_type is not None:
-                print('Exception during synchronization of package {} (EID {}): {}'.format(
+                log.error('Exception during synchronization of package {} (EID {}): {}'.format(
                     self._pkg_dict['id'], self._eid, exc_val))
-                print('Not synchronizing that package.')
+                log.error('Not synchronizing that package.')
                 return
-            print('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
+            log.debug('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
             self._package._upload()
 
 
@@ -182,6 +195,7 @@ class Package(DictWrapper):
         '''
         Upload package dict to CKAN.
         '''
+        log.debug('Package._upload: self._dict = {}'.format(self._dict))
         self._api.action.package_update(**self._dict)
 
     @_nested_cm_method
@@ -191,12 +205,12 @@ class Package(DictWrapper):
             res_dicts = self._find_res()
             if not res_dicts:
                 self._create_res()
-                print('Created new resource {} for EID {}'.format(self._res_dict['id'], eid))
+                log.info('Created new resource {} for EID {}'.format(self._res_dict['id'], eid))
             elif len(res_dicts) > 1:
                 raise ValueError('Multiple resources for EID {}'.format(eid))
             else:
                 self._res_dict = res_dicts[0]
-                print('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
+                log.debug('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
 
         def _find_res(self):
             return [res_dict for res_dict in self._outer._dict['resources']
@@ -210,17 +224,15 @@ class Package(DictWrapper):
             self._propagate_changes()
 
         def __enter__(self):
-            #print('sync_resource.__enter__')
             return Resource(self._outer, self._res_dict)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            #print('sync_resource.__exit__')
             if exc_type is not None:
-                print('Exception during synchronization of resource {} (EID {}): {}'.format(
+                log.error('Exception during synchronization of resource {} (EID {}): {}'.format(
                     self._res_dict['id'], self._eid, exc_val))
-                print('Not synchronizing that resource.')
+                log.error('Not synchronizing that resource.')
                 return
-            print('Uploading updated version of resource {} (EID {})'.format(self._res_dict['id'], self._eid))
+            log.debug('Uploading updated version of resource {} (EID {})'.format(self._res_dict['id'], self._eid))
             # TODO: Perhaps we should only store the changes in the cached pkg dict
             #       and then upload only once (the whole package)? As long as we're
             #       not doing file uploads that should work.
@@ -273,11 +285,11 @@ class Resource(DictWrapper):
                 # doesn't allow us to alter it afterwards. Hence we return an
                 # empty dict here and do the creation when entering the context
                 # manager.
-                print('Delaying view creation for EID {}'.format(eid))
+                log.debug('Delaying view creation for EID {}'.format(eid))
                 self._view_dict = {}
             else:
                 self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
-                print('Using existing view {} for EID {}'.format(view_id, eid))
+                log.debug('Using existing view {} for EID {}'.format(view_id, eid))
 
         def __enter__(self):
             return self._view_dict
@@ -288,15 +300,15 @@ class Resource(DictWrapper):
                 try:
                     id = view['id']
                 except KeyError:
-                    print('Exception during synchronization of new view (EID {}): {}'.format(
-                          self._eid, exc_val))
+                    log.error('Exception during synchronization of new view (EID {}): {}'.format(
+                              self._eid, exc_val))
                 else:
-                    print('Exception during synchronization of view {} (EID {}): {}'.format(
-                          id, self._eid, exc_val))
-                print('Not synchronizing that view.')
+                    log.error('Exception during synchronization of view {} (EID {}): {}'.format(
+                              id, self._eid, exc_val))
+                log.error('Not synchronizing that view.')
                 return
             if 'id' in view:
-                print('Uploading updated version of view {} (EID {})'.format(view['id'], self._eid))
+                log.debug('Uploading updated version of view {} (EID {})'.format(view['id'], self._eid))
                 self._view_dict = self._outer._pkg._api.action.resource_view_update(**view)
             else:
                 # Create the view
@@ -308,7 +320,7 @@ class Resource(DictWrapper):
                 views[self._eid] = self._view_dict['id']
                 self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
 
-                print('Created view {} for EID {}'.format(self._view_dict['id'], self._eid))
+                log.info('Created view {} for EID {}'.format(self._view_dict['id'], self._eid))
 
 
 class ExtrasDictView(collections.MutableMapping):
