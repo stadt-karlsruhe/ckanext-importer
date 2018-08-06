@@ -133,3 +133,16 @@ def imp(imp_factory):
     '''
     return imp_factory()
 
+
+@pytest.fixture
+def pkg(imp):
+    '''
+    Package fixture.
+
+    Yields a ``ckanext.importer.Package`` instance.
+
+    Once the test case is finished, the CKAN DB is reset and the search
+    index is rebuilt.
+    '''
+    with imp.sync_package('test-package-eid') as package:
+        yield package

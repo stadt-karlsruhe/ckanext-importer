@@ -49,7 +49,7 @@ _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 class Importer(object):
 
     def __init__(self, id, api=None, default_owner_org=None):
-        self.id = id
+        self.id = unicode(id)
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
 
@@ -59,7 +59,7 @@ class Importer(object):
         Synchronize a package.
         '''
         def __init__(self, eid):
-            self._eid = eid
+            self._eid = unicode(eid)
             pkg_dicts = self._find_pkgs()
             if not pkg_dicts:
                 self._pkg_dict = self._create_pkg()
@@ -129,6 +129,9 @@ class Importer(object):
             log.debug('Uploading updated version of package {} (EID {})'.format(self._pkg_dict['id'], self._eid))
             self._package._upload()
 
+    def __repr__(self):
+        return '<Importer "{}">'.format(self.id)
+
 
 class Package(DictWrapper):
     '''
@@ -155,7 +158,7 @@ class Package(DictWrapper):
     @context_manager_method
     class sync_resource(object):
         def __init__(self, eid):
-            self._eid = eid
+            self._eid = unicode(eid)
             res_dicts = self._find_res()
             if not res_dicts:
                 self._create_res()
@@ -227,7 +230,7 @@ class Resource(DictWrapper):
         # simply store the view's EID in the view itself. Instead,
         # we store that information in a separate resource extra.
         def __init__(self, eid):
-            self._eid = eid
+            self._eid = unicode(eid)
 
             views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
             try:
