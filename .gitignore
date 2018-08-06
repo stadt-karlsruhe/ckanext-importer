@@ -5,6 +5,7 @@
 *.egg-info/
 
 /test-local.ini
+/.coverage
 
 .*.swp
 *.pyc
