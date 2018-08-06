@@ -385,37 +385,3 @@ class ExtrasDictView(collections.MutableMapping):
 
     def __iter__(self):
         return (extra['key'] for extra in self._extras)
-
-
-if __name__ == '__main__':
-    import io
-    import json
-
-    with io.open('apikey.json', 'r', encoding='utf-8') as f:
-        apikey = json.load(f)['apikey']
-
-    with ckanapi.RemoteCKAN('https://test-transparenz.karlsruhe.de', apikey=apikey) as api:
-        imp = Importer(api, 'test-importer', 'stadt-karlsruhe')
-        with imp.sync_package('peid1') as pkg:
-            pkg_counter = int(pkg.extras.get('counter', 0))
-            print('package counter = {!r}'.format(pkg_counter))
-            pkg.extras['counter'] = pkg_counter + 1
-
-            with io.open('test.csv', 'r', encoding='utf-8') as upload:
-
-                with pkg.sync_resource('reid1') as res:
-                    res_counter = int(res.get('counter', 0))
-                    print('resource counter = {!r}'.format(res_counter))
-                    res['counter'] = res_counter + 1
-
-                    # File upload
-                    print('resource url = {!r}'.format(res['url']))
-                    res['upload'] = upload
-
-                    with res.sync_view('veid2') as view:
-                        view['view_type'] = 'text_view'
-
-                        counter = int(view.get('title', 0))
-                        print('view counter = {!r}'.format(counter))
-                        view['title'] = counter + 1
-
