@@ -27,6 +27,8 @@ import re
 
 import ckanapi
 
+from .utils import DictWrapper, context_manager_method
+
 
 __version__ = '0.1.0'
 
@@ -42,51 +44,6 @@ def _solr_escape(s):
     return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
 
 
-# Idea for starting a context manager on a method call:
-#
-# - Only a class can implement the CM protocol (using its __enter__ and
-#   __exit__ methods), so accessing (not calling!) the target method must
-#  return a suitable class.
-#
-# - That can be achieved using a descriptor class (that provides __get__ and
-#   __set__ methods).
-#
-# - The nested CM should have knowledge of the outer CM. This is achieved
-#   by wrapping the inner CM class in a function that creates an instance of
-#   the inner class and then sets an appropriate attribute on it.
-#
-# - Finally we use a class for the wrapping, so that we can provide a
-#   meaningful `repr`.
-class _nested_cm_method(object):
-
-    def __init__(self, cls):
-        self._cls = cls
-
-    def __get__(self, obj, type=None):
-
-        class NestedCM(object):
-            __name__ = self._cls.__name__
-            __doc__ = self._cls.__doc__
-
-            def __call__(_, *args, **kwargs):
-                instance = self._cls.__new__(self._cls)
-                instance._outer = obj
-                instance.__init__(*args, **kwargs)
-                return instance
-
-            def __repr__(_):
-                return '<nested context manager method {}.{} of {}>'.format(
-                    obj.__class__.__name__,
-                    self._cls.__name__,
-                    obj,
-                )
-
-        return NestedCM()
-
-    def __set__(self, obj, value):
-        raise AttributeError('Read-only attribute')
-
-
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
@@ -96,7 +53,7 @@ class Importer(object):
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
 
-    @_nested_cm_method
+    @context_manager_method
     class sync_package(object):
         '''
         Synchronize a package.
@@ -173,26 +130,6 @@ class Importer(object):
             self._package._upload()
 
 
-class DictWrapper(collections.MutableMapping):
-    def __init__(self, d):
-        self._dict = d
-
-    def __getitem__(self, key):
-        return self._dict[key]
-
-    def __setitem__(self, key, value):
-        self._dict[key] = value
-
-    def __delitem__(self, key):
-        del self._dict[key]
-
-    def __iter__(self):
-        return iter(self._dict)
-
-    def __len__(self):
-        return len(self._dict)
-
-
 class Package(DictWrapper):
     '''
     Wrapper around a CKAN package dict.
@@ -215,7 +152,7 @@ class Package(DictWrapper):
         log.debug('Package._upload: self._dict = {}'.format(self._dict))
         self._api.action.package_update(**self._dict)
 
-    @_nested_cm_method
+    @context_manager_method
     class sync_resource(object):
         def __init__(self, eid):
             self._eid = eid
@@ -283,7 +220,7 @@ class Resource(DictWrapper):
         super(Resource, self).__init__(res_dict)
         self._pkg = pkg
 
-    @_nested_cm_method
+    @context_manager_method
     class sync_view(object):
         # Currently there is no way to attach extras to views (see
         # https://github.com/ckan/ckan/issues/2655), so we cannot
