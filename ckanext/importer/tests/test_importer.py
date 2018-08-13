@@ -20,11 +20,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+import StringIO
+
 import pytest
 
 from ckanext.importer import Importer, ExtrasDictView
-
-from .conftest import reset_db
+import ckanapi
 
 
 # See conftest.py for the definition of the pytest fixtures
@@ -38,7 +39,6 @@ class TestImporter(object):
         '''
         title = 'Hello, world!'
         with imp.sync_package('x') as pkg:
-            pass
             # Check that the package already exists
             id = pkg['id']
             api.action.package_show(id=id)
@@ -132,26 +132,113 @@ class TestImporter(object):
         assert repr(imp) == '<Importer "{}">'.format(imp.id)
 
 
-#class TestPackage(object):
-#
-#    def test_resource_creation(self, api):
-#        '''
-#        Test creation of a resource.
-#        '''
-#        title = 'Hello, world!'
-#        print(api)
-#        pkg2 = api.action.package_create(name='foo')
-#        res = api.action.resource_create(package_id=pkg2['id'], url='http://foo.bar')
-#        with pkg.sync_resource('x') as res:
-#            pass
-#            # Check that the resource already exists
-#            id = res['id']
-#            api.action.resource_show(id=id)
-#
-#            res['title'] = title
-#
-#        # Check that the changes have been synced
-#        assert api.action.resource_show(id=id)['title'] == title
+class TestPackage(object):
+
+    def test_nonstring_resource_eids(self, pkg):
+        '''
+        Test that resource EIDs don't have to be strings.
+        '''
+        eids = [
+            1,
+            True,
+            None,
+            {'foo': 'bar'},
+            ['foo', 'bar'],
+        ]
+        ids = set()
+        for eid in eids:
+            with pkg.sync_resource(eid) as res:
+                ids.add(res['id'])
+        assert len(ids) == len(eids)
+
+    def test_resource_creation(self, api, pkg):
+        '''
+        Test creation of a resource.
+        '''
+        name = 'Hello, world!'
+        with pkg.sync_resource('x') as res:
+            pass
+            # Check that the resource already exists
+            id = res['id']
+            res_dict = api.action.resource_show(id=id)
+
+            # Check that the cached package dict has been updated
+            assert pkg['resources'][0] == res_dict
+
+            res['name'] = name
+
+        # Check that the changes have been uploaded
+        assert api.action.resource_show(id=id)['name'] == name
+
+        # Check that the cached package dict has been updated
+        assert pkg['resources'][0]['name'] == name
+
+    def test_multiple_resources_same_eid(self, api, imp):
+        '''
+        Test multiple resources with the same EID.
+        '''
+        pkg_eid = 'a'
+        res_eid = 'b'
+        with imp.sync_package(pkg_eid) as pkg:
+            pass
+        for _ in [1, 2]:
+            api.action.resource_create(package_id=pkg['id'], url='foo',
+                                       ckanext_importer_resource_eid=res_eid)
+        with imp.sync_package(pkg_eid) as pkg:
+            with pytest.raises(ValueError):
+                with pkg.sync_resource(res_eid) as res:
+                    pass
+
+    def test_resource_update(self, api, pkg):
+        '''
+        Test update of a resource.
+        '''
+        for i in range(3):
+            name = str(i)
+            with pkg.sync_resource('y') as res:
+                res['name'] = name
+                id = res['id']
+            # Check that the changes have been uploaded
+            assert api.action.resource_show(id=id)['name'] == name
+
+            # Check that the cached package dict has been updated
+            assert pkg['resources'][0]['name'] == name
+
+    def test_file_upload_during_resource_creation(self, api, pkg):
+        '''
+        Test uploading a file during resource creation.
+        '''
+        fake_file = StringIO.StringIO('1,2,3\r\n4,5,6')
+        fake_file.name = 'fake.csv'
+        with pkg.sync_resource('x') as res:
+            res['upload'] = fake_file
+        url = api.action.resource_show(id=res['id'])['url']
+        assert url.endswith(fake_file.name)
+
+        # Check that the `upload` key has not been stored in the cached
+        # package dict
+        assert 'upload' not in pkg['resources'][0]
+
+    def test_file_upload_during_resource_update(self, api, pkg):
+        '''
+        Test uploading a file during resource creation.
+        '''
+        with pkg.sync_resource('x') as res:
+            res['url'] = 'foo'
+
+        fake_file = StringIO.StringIO('1,2,3\r\n4,5,6')
+        fake_file.name = 'fake.csv'
+        with pkg.sync_resource('x') as res:
+            res['upload'] = fake_file
+        url = api.action.resource_show(id=res['id'])['url']
+        assert url.endswith(fake_file.name)
+
+        # Check that the `upload` key has not been stored in the cached
+        # package dict
+        assert 'upload' not in pkg['resources'][0]
+
+    def test_repr(self, pkg):
+        assert repr(pkg) == '<Package {}>'.format(pkg['id'])
 
 
 class TestExtrasDictView(object):

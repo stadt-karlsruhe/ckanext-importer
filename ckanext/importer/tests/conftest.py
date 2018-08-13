@@ -78,10 +78,20 @@ def _register_translator():
     registry.register(translator, translator_obj)
 
 
-def _rebuild_search_index():
+def rebuild_dbs(api):
     '''
-    Rebuild CKAN's Solr search index.
+    Rebuild CKAN's DB and search index.
     '''
+    # Rebuild the DB
+    reset_db()
+
+    # Recreate the site user, otherwise action functions that require
+    # authentication won't work. CKANAPI's `get_site_username` calls CKAN's
+    # get_site_user which automatically creates the site user if it doesn't
+    # exist. See https://github.com/ckan/ckanapi/issues/136.
+    api.get_site_username()
+
+    # Rebuild search index
     ckan.lib.search.rebuild(defer_commit=True)
     ckan.lib.search.commit()
 
@@ -117,8 +127,7 @@ def imp_factory(api):
 
     yield importer
 
-    reset_db()
-    _rebuild_search_index()
+    rebuild_dbs(api)
 
 
 @pytest.fixture
