@@ -34,7 +34,7 @@ import pytest
 from ckan.config.environment import load_environment
 from ckan.lib.cli import MockTranslator
 import ckan.lib.search
-from ckan.tests.helpers import reset_db
+from ckan.tests.helpers import FunctionalTestBase, reset_db
 import ckanapi
 
 import ckanext.importer
@@ -82,7 +82,6 @@ def rebuild_dbs(api):
     '''
     Rebuild CKAN's DB and search index.
     '''
-    # Rebuild the DB
     reset_db()
 
     # Recreate the site user, otherwise action functions that require
@@ -91,25 +90,43 @@ def rebuild_dbs(api):
     # exist. See https://github.com/ckan/ckanapi/issues/136.
     api.get_site_username()
 
-    # Rebuild search index
-    ckan.lib.search.rebuild(defer_commit=True)
-    ckan.lib.search.commit()
+    ckan.lib.search.clear_all()
 
 
 @pytest.fixture(scope='session')
-def api():
+def app():
+    '''
+    CKAN app fixture.
+
+    Initializes the CKAN environment.
+    '''
+    # This is a wrapper around CKAN's corresponding nosetest-fixture
+    _load_ckan_environment(TEST_INI)
+    FunctionalTestBase.setup_class()
+    test_app = FunctionalTestBase._get_test_app()
+    try:
+        flask_app = test_app.flask_app
+    except AttributeError:
+        yield test_app
+    else:
+        # See https://github.com/ckan/ckan/issues/3083
+        with flask_app.test_request_context():
+            yield test_app
+    FunctionalTestBase.teardown_class()
+
+
+@pytest.fixture(scope='session')
+def api(app):
     '''
     CKAN API fixture.
 
-    Initializes the CKAN environment and returns a ``ckanapi.LocalCKAN``
-    instance.
+    Returns a ``ckanapi.LocalCKAN`` instance.
     '''
-    _load_ckan_environment(TEST_INI)
     return ckanapi.LocalCKAN()
 
 
 @pytest.fixture
-def imp_factory(api):
+def imp_factory(app, api):
     '''
     Importer factory fixture.
 
@@ -128,6 +145,7 @@ def imp_factory(api):
     yield importer
 
     rebuild_dbs(api)
+    app.reset()
 
 
 @pytest.fixture
