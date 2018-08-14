@@ -473,6 +473,16 @@ class TestResource(object):
         assert api.action.resource_view_show(id=id) == view_dict
 
 
+class TestView(object):
+
+    def test_repr(self, res):
+        with res.sync_view('a') as view:
+            assert repr(view) == '<View [to-be-created]>'
+            view['view_type'] = 'text_view'
+            view['title'] = 'title'
+        assert repr(view) == '<View {}>'.format(view['id'])
+
+
 class TestExtrasDictView(object):
 
     def test_getitem(self):
