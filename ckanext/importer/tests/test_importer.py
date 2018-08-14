@@ -157,7 +157,6 @@ class TestPackage(object):
         '''
         name = 'Hello, world!'
         with pkg.sync_resource('x') as res:
-            pass
             # Check that the resource already exists
             id = res['id']
             res_dict = api.action.resource_show(id=id)
@@ -239,6 +238,57 @@ class TestPackage(object):
 
     def test_repr(self, pkg):
         assert repr(pkg) == '<Package {}>'.format(pkg['id'])
+
+
+class TestResource(object):
+
+    def test_nonstring_view_eids(self, res):
+        '''
+        Test that view EIDs don't have to be strings.
+        '''
+        eids = [
+            1,
+            True,
+            None,
+            {'foo': 'bar'},
+            ['foo', 'bar'],
+        ]
+        ids = set()
+        for eid in eids:
+            with res.sync_view(eid) as view:
+                view['title'] = 'title'
+                view['view_type'] = 'text_view'
+            ids.add(view['id'])
+        assert len(ids) == len(eids)
+
+    def test_view_creation(self, api, res):
+        '''
+        Test creation of a view.
+        '''
+        title = 'Hello, world!'
+        with res.sync_view('x') as view:
+            assert view == {}
+            view['title'] = title
+            view['view_type'] = 'text_view'
+        assert api.action.resource_view_show(id=view['id'])['title'] == title
+
+    def test_view_update(self, api, res):
+        '''
+        Test update of a view.
+        '''
+        eid = 'y'
+        with res.sync_view(eid) as view:
+            view['title'] = 'title'
+            view['view_type'] = 'text_view'
+        id = view['id']
+        for i in range(3):
+            title = str(i)
+            with res.sync_view(eid) as view:
+                view['title'] = title
+            assert api.action.resource_view_show(id=id)['title'] == title
+
+    def test_repr(self, res):
+        assert repr(res) == '<Resource {}>'.format(res['id'])
 
 
 class TestExtrasDictView(object):

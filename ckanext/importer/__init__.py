@@ -27,7 +27,7 @@ import re
 
 import ckanapi
 
-from .utils import DictWrapper, context_manager_method
+from .utils import DictWrapper, context_manager_method, replace_dict
 
 
 __version__ = '0.1.0'
@@ -63,12 +63,13 @@ class Importer(object):
             pkg_dicts = self._find_pkgs()
             if not pkg_dicts:
                 self._pkg_dict = self._create_pkg()
-                log.info('Created package {} for EID {}'.format(self._pkg_dict['id'], eid))
+                log.info('Created package {} for EID {}'.format(self._pkg_dict['id'], self._eid))
             elif len(pkg_dicts) > 1:
-                raise ValueError('Multiple packages for EID {}'.format(eid))
+                raise ValueError('Multiple packages for EID {}'.format(self._eid))
             else:
                 self._pkg_dict = pkg_dicts[0]
-                log.debug('Using existing package {} for EID {}'.format(self._pkg_dict['id'], eid))
+                log.debug('Using existing package {} for EID {}'.format(self._pkg_dict['id'], self._eid))
+            self._package = Package(self._outer._api, self._pkg_dict)
 
         def _find_pkgs(self):
             extras = {
@@ -117,7 +118,6 @@ class Importer(object):
                     raise
 
         def __enter__(self):
-            self._package = Package(self._outer._api, self._pkg_dict)
             return self._package
 
         def __exit__(self, exc_type, exc_val, exc_tb):
@@ -153,7 +153,8 @@ class Package(DictWrapper):
         Upload package dict to CKAN.
         '''
         log.debug('Package._upload: self._dict = {}'.format(self._dict))
-        self._api.action.package_update(**self._dict)
+        replace_dict(self._dict,
+                     self._api.action.package_update(**self._dict))
 
     @context_manager_method
     class sync_resource(object):
@@ -162,12 +163,13 @@ class Package(DictWrapper):
             res_dicts = self._find_res()
             if not res_dicts:
                 self._create_res()
-                log.info('Created new resource {} for EID {}'.format(self._res_dict['id'], eid))
+                log.info('Created new resource {} for EID {}'.format(self._res_dict['id'], self._eid))
             elif len(res_dicts) > 1:
-                raise ValueError('Multiple resources for EID {}'.format(eid))
+                raise ValueError('Multiple resources for EID {}'.format(self._eid))
             else:
                 self._res_dict = res_dicts[0]
-                log.debug('Using existing resource {} for EID {}'.format(self._res_dict['id'], eid))
+                log.debug('Using existing resource {} for EID {}'.format(self._res_dict['id'], self._eid))
+            self._resource = Resource(self._outer, self._res_dict)
 
         def _find_res(self):
             return [res_dict for res_dict in self._outer._dict['resources']
@@ -178,10 +180,10 @@ class Package(DictWrapper):
                 package_id=self._outer['id'],
                 ckanext_importer_resource_eid=self._eid,
             )
-            self._propagate_changes()
+            self._outer._dict['resources'].append(self._res_dict)
 
         def __enter__(self):
-            return Resource(self._outer, self._res_dict)
+            return self._resource
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             if exc_type is not None:
@@ -196,21 +198,12 @@ class Package(DictWrapper):
             self._upload()
 
         def _upload(self):
-            self._res_dict = self._outer._api.action.resource_update(**self._res_dict)
-            self._propagate_changes()
+            '''
+            Upload the modified resource dict and propagate the changes.
+            '''
+            replace_dict(self._res_dict,
+                         self._outer._api.action.resource_update(**self._res_dict))
 
-        def _propagate_changes(self):
-            '''
-            Propagate changes in the cached resource dict to the cached package dict.
-            '''
-            for res_dict in self._outer._dict['resources']:
-                if res_dict['id'] == self._res_dict['id']:
-                    # Update existing cached resource
-                    res_dict.clear()
-                    res_dict.update(self._res_dict)
-                    return
-            # Append new cached resource
-            self._outer._dict['resources'].append(self._res_dict)
 
 
 class Resource(DictWrapper):
@@ -223,6 +216,9 @@ class Resource(DictWrapper):
         super(Resource, self).__init__(res_dict)
         self._pkg = pkg
 
+    def __repr__(self):
+        return '<{} {}>'.format(self.__class__.__name__, self['id'])
+
     @context_manager_method
     class sync_view(object):
         # Currently there is no way to attach extras to views (see
@@ -234,7 +230,7 @@ class Resource(DictWrapper):
 
             views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
             try:
-                view_id = views[eid]
+                view_id = views[self._eid]
             except KeyError:
                 # Ideally, we'd like to create a new view here (like we do for
                 # packages and resources). However, CKAN's resource_view_create
@@ -242,11 +238,11 @@ class Resource(DictWrapper):
                 # doesn't allow us to alter it afterwards. Hence we return an
                 # empty dict here and do the creation when entering the context
                 # manager.
-                log.debug('Delaying view creation for EID {}'.format(eid))
+                log.debug('Delaying view creation for EID {}'.format(self._eid))
                 self._view_dict = {}
             else:
                 self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
-                log.debug('Using existing view {} for EID {}'.format(view_id, eid))
+                log.debug('Using existing view {} for EID {}'.format(view_id, self._eid))
 
         def __enter__(self):
             return self._view_dict
@@ -266,16 +262,27 @@ class Resource(DictWrapper):
                 return
             if 'id' in view:
                 log.debug('Uploading updated version of view {} (EID {})'.format(view['id'], self._eid))
-                self._view_dict = self._outer._pkg._api.action.resource_view_update(**view)
+                replace_dict(self._view_dict,
+                             self._outer._pkg._api.action.resource_view_update(**view))
             else:
                 # Create the view
                 view['resource_id'] = self._outer['id']
-                self._view_dict = self._outer._pkg._api.action.resource_view_create(**view)
+                replace_dict(self._view_dict,
+                             self._outer._pkg._api.action.resource_view_create(**view))
 
                 # Register it in the resource
                 views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
                 views[self._eid] = self._view_dict['id']
                 self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+                # FIXME: This adds the view to the local res dict, but the
+                #         upstream res dict is only updated once the
+                #         sync_resource CM exits. If this doesn't happen (due
+                #         to an exception or a call to dont_sync) then we end
+                #         up with an already created view on the resource that
+                #         isn't properly tracked by ckanext.importer. At the
+                #         very least we should automatically discover such
+                #         stray views, better would be to prevent it in the
+                #         first place.
 
                 log.info('Created view {} for EID {}'.format(self._view_dict['id'], self._eid))
 

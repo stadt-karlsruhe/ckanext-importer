@@ -173,3 +173,17 @@ def pkg(imp):
     '''
     with imp.sync_package('test-package-eid') as package:
         yield package
+
+
+@pytest.fixture
+def res(pkg):
+    '''
+    Resource fixture.
+
+    Yields a ``ckanext.importer.Resource`` instance.
+
+    Once the test case is finished, the CKAN DB is reset and the search
+    index is rebuilt.
+    '''
+    with pkg.sync_resource('test-resource-eid') as resource:
+        yield resource

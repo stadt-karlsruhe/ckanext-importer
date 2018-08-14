@@ -122,3 +122,17 @@ class DictWrapper(collections.MutableMapping):
 
     def __contains__(self, key):
         return key in self._dict
+
+
+def replace_dict(old, new):
+    '''
+    Replace the content of a dict in-place.
+
+    A ``ValueError`` is raised if both ``old`` and ``new`` point to the
+    same object.
+    '''
+    if old is new:
+        raise ValueError('old and new point to the same object')
+    old.clear()
+    old.update(new)
+

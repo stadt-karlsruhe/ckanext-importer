@@ -22,7 +22,8 @@ from __future__ import (absolute_import, division, print_function,
 
 import pytest
 
-from ckanext.importer.utils import context_manager_method, DictWrapper
+from ckanext.importer.utils import (context_manager_method, DictWrapper,
+                                    replace_dict)
 
 
 class TestDictWrapper(object):
@@ -98,4 +99,18 @@ class TestContextManagerMethod(object):
     def test_repr(self):
         foo = self.Foo('x')
         assert repr(foo.cm) == '<context manager method Foo.cm of Foo(x)>'
+
+
+def test_replace_dict():
+    d1 = {1: 2, 3: 4}
+    d2 = d1
+    for d3 in [
+        {},
+        {5: 6},
+        {1: 2, 3: 4},
+    ]:
+        replace_dict(d1, d3)
+        assert d1 == d3
+        assert d2 is d1
+        assert d3 is not d1
 
