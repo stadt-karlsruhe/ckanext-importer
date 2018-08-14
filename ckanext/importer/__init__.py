@@ -24,25 +24,120 @@ import collections
 from enum import Enum
 import json
 import logging
-import re
 
 import ckanapi
 
-from .utils import DictWrapper, context_manager_method, replace_dict
+from .utils import DictWrapper, context_manager_method, replace_dict, solr_escape
 
 
 __version__ = '0.1.0'
 
-_SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
 
 log = logging.getLogger(__name__)
 
 
-def _solr_escape(s):
+class SyncMode(Enum):
     '''
-    Escape strings for Solr queries.
+    How to sync a package, resource, or view.
     '''
-    return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
+    sync = 1       # Sync normally
+    dont_sync = 2  # Don't sync (keep the existing version)
+    delete = 3     # Delete the existing version
+
+
+class Entity(DictWrapper):
+    '''
+    Base class for package, resource, and view wrappers.
+
+    Not to be instantiated directly.
+    '''
+    def __init__(self, eid, d):
+        '''
+        Constructor.
+
+        ``d`` is the dict wrapped by this entity.
+        '''
+        super(Entity, self).__init__(d)
+        self._eid = eid
+        self.sync_mode = SyncMode.sync
+
+    def delete(self):
+        '''
+        Mark this entity for deletion.
+        '''
+        self.sync_mode = SyncMode.delete
+
+    def dont_sync(self):
+        '''
+        Mark this entity for no synchronization.
+        '''
+        self.sync_mode = SyncMode.dont_sync
+
+    def _delete(self):
+        '''
+        Actually delete this entity.
+
+        Must be implemented by subclasses.
+        '''
+        raise NotImplementedError()
+
+    def _upload(self):
+        '''
+        Upload this entity.
+
+        Must be implemented by subclasses.
+        '''
+        raise NotImplementedError()
+
+    def __repr__(self):
+        try:
+            id_part = 'id={!r} '.format(self['id'])
+        except KeyError:
+            id_part = ''
+        return '<{} {}eid={!r}>'.format(self.__class__.__name__,
+                                        id_part, self._eid)
+
+
+class EntitySyncManager(object):
+    '''
+    Context manager for synchronizing an ``Entity``.
+
+    Do not instantiate directly.
+    '''
+    def __init__(self, eid):
+        self._eid = unicode(eid)
+        self._entity = self._prepare_entity()
+        assert self._entity is not None
+
+    def _prepare_entity(self):
+        '''
+        Find, create, or otherwise prepare the entity.
+
+        Subclasses must implement this method to return an entity based
+        on ``_eid``.
+        '''
+        raise NotImplementedError()
+
+    def __enter__(self):
+        return self._entity
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        entity = self._entity
+        if exc_type is not None:
+            log.error('An error occured during the synchronization of {}: {}'.format(entity, exc_val),
+                      exc_info=(exc_type, exc_val, exc_tb))
+            log.error('Changes to {} will not be uploaded'.format(entity))
+            return
+        if entity.sync_mode == SyncMode.sync:
+            log.debug('Uploading {}'.format(entity))
+            entity._upload()
+        elif entity.sync_mode == SyncMode.dont_sync:
+            log.debug('{} is marked as "dont sync"'.format(entity))
+        elif entity.sync_mode == SyncMode.delete:
+            log.debug('{} is marked as "delete", removing it'.format(entity))
+            entity._delete()
+        else:
+            raise ValueError('Unknown sync mode {} for {}'.format(entity.sync_mode, entity))
 
 
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
@@ -55,48 +150,28 @@ class Importer(object):
         self.default_owner_org = default_owner_org
 
     @context_manager_method
-    class sync_package(object):
-        '''
-        Synchronize a package.
-        '''
-        def __init__(self, eid):
-            self._eid = unicode(eid)
+    class sync_package(EntitySyncManager):
+        def _prepare_entity(self):
             pkg_dicts = self._find_pkgs()
             if not pkg_dicts:
-                self._pkg_dict = self._create_pkg()
-                log.info('Created package {} for EID {}'.format(self._pkg_dict['id'], self._eid))
+                pkg_dict = self._create_pkg()
+                pkg = Package(self._eid, pkg_dict, self._outer._api)
+                log.debug('Created {}'.format(pkg))
+                return pkg
             elif len(pkg_dicts) > 1:
                 raise ValueError('Multiple packages for EID {}'.format(self._eid))
             else:
-                self._pkg_dict = pkg_dicts[0]
-                log.debug('Using existing package {} for EID {}'.format(self._pkg_dict['id'], self._eid))
-            self._package = Package(self._outer._api, self._pkg_dict)
-
-        def _find_pkgs(self):
-            extras = {
-                'ckanext_importer_importer_id': _solr_escape(self._outer.id),
-                'ckanext_importer_package_eid': _solr_escape(self._eid),
-            }
-            fq = ' AND '.join('extras_{}:"{}"'.format(*item)
-                              for item in extras.items())
-            # FIXME: Support for paging
-            result = self._outer._api.action.package_search(fq=fq, rows=1000)
-
-            # CKAN's search is based on Solr, which by default doesn't support
-            # searching for exact matches. Hence searching for importer ID "x"
-            # can also return packages with importer ID "x-y". Hence we filter
-            # the results again.
-            pkgs = []
-            for pkg in result['results']:
-                extras = ExtrasDictView(pkg['extras'])
-                if (extras['ckanext_importer_importer_id'] == self._outer.id and
-                    extras['ckanext_importer_package_eid'] == self._eid):
-                    pkgs.append(pkg)
-
-            return pkgs
-
+                pkg = Package(self._eid, pkg_dicts[0], self._outer._api)
+                log.debug('Using {}'.format(pkg))
+                return pkg
 
         def _create_pkg(self):
+            '''
+            Create a new CKAN package.
+
+            Takes care of finding an unused name and of setting the
+            required ckanext.importer metadata.
+            '''
             i = 0
             while True:
                 name = '{}{}'.format(_PACKAGE_NAME_PREFIX, i)
@@ -118,67 +193,34 @@ class Importer(object):
                         continue
                     raise
 
-        def __enter__(self):
-            return self._package
+        def _find_pkgs(self):
+            '''
+            Find existing packages with the given EID.
+            '''
+            extras = {
+                'ckanext_importer_importer_id': solr_escape(self._outer.id),
+                'ckanext_importer_package_eid': solr_escape(self._eid),
+            }
+            fq = ' AND '.join('extras_{}:"{}"'.format(*item)
+                              for item in extras.items())
+            # FIXME: Support for paging
+            result = self._outer._api.action.package_search(fq=fq, rows=1000)
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            pkg = self._package
-            if exc_type is not None:
-                log.error('Exception during synchronization of package {} (EID {}): {}'.format(
-                    pkg['id'], self._eid, exc_val))
-                log.error('Not synchronizing that package.')
-                return
-            if pkg.sync_mode == SyncMode.sync:
-                log.debug('Uploading updated version of package {} (EID {})'.format(pkg['id'], self._eid))
-                pkg._upload()
-            elif pkg.sync_mode == SyncMode.dont_sync:
-                log.debug('Package {} (EID {}) is marked as "dont sync"'.format(pkg['id'], self._eid))
-            elif pkg.sync_mode == SyncMode.delete:
-                log.debug('Package {} (EID {}) is marked as "delete", removing it'.format(pkg['id'], self._eid))
-                pkg._purge()
-            else:
-                raise ValueError('Unknown sync mode {} for package {} (EID {})'.format(
-                                 pkg.sync_mode, pkg['id'], self._eid))
+            # CKAN's search is based on Solr, which by default doesn't support
+            # searching for exact matches. Hence searching for importer ID "x"
+            # can also return packages with importer ID "x-y". Hence we filter
+            # the results again.
+            pkgs = []
+            for pkg in result['results']:
+                extras = ExtrasDictView(pkg['extras'])
+                if (extras['ckanext_importer_importer_id'] == self._outer.id and
+                    extras['ckanext_importer_package_eid'] == self._eid):
+                    pkgs.append(pkg)
+
+            return pkgs
 
     def __repr__(self):
-        return '<{} {}>'.format(self.__class__.__name__, self.id)
-
-
-class SyncMode(Enum):
-    '''
-    How to sync a package, resource, or view.
-    '''
-    sync = 1       # Sync normally
-    dont_sync = 2  # Don't sync (keep the existing version)
-    delete = 3     # Delete the existing version
-
-
-class Entity(DictWrapper):
-    '''
-    Base class for package, resource, and view wrappers.
-
-    Not to be instantiated directly.
-    '''
-    def __init__(self, d):
-        '''
-        Constructor.
-
-        ``d`` is the dict wrapped by this entity.
-        '''
-        super(Entity, self).__init__(d)
-        self.sync_mode = SyncMode.sync
-
-    def delete(self):
-        '''
-        Delete this entity.
-        '''
-        self.sync_mode = SyncMode.delete
-
-    def dont_sync(self):
-        '''
-        Do not sync this entity.
-        '''
-        self.sync_mode = SyncMode.dont_sync
+        return '<{} id={!r}>'.format(self.__class__.__name__, self.id)
 
 
 class Package(Entity):
@@ -188,91 +230,44 @@ class Package(Entity):
     Not to be instantiated directly. Use ``Importer.sync_package``
     instead.
     '''
-    def __init__(self, api, pkg_dict):
-        super(Package, self).__init__(pkg_dict)
+    def __init__(self, eid, pkg_dict, api):
+        super(Package, self).__init__(eid, pkg_dict)
         self._api = api
         self.extras = ExtrasDictView(pkg_dict['extras'])
-
-    def __repr__(self):
-        return '<{} {}>'.format(self.__class__.__name__, self['id'])
 
     def _upload(self):
         '''
         Upload package dict to CKAN.
         '''
-        log.debug('Package._upload: self._dict = {}'.format(self._dict))
-        replace_dict(self._dict,
-                     self._api.action.package_update(**self._dict))
+        replace_dict(self,
+                     self._api.action.package_update(**self))
 
-    def _purge(self):
+    def _delete(self):
         '''
         Purge this package.
         '''
-        self._api.action.dataset_purge(id=self._dict['id'])
+        self._api.action.dataset_purge(id=self['id'])
 
     @context_manager_method
-    class sync_resource(object):
-        def __init__(self, eid):
-            self._eid = unicode(eid)
-            res_dicts = self._find_res()
+    class sync_resource(EntitySyncManager):
+        def _prepare_entity(self):
+            res_dicts = [r for r in self._outer['resources']
+                         if r['ckanext_importer_resource_eid'] == self._eid]
             if not res_dicts:
-                self._create_res()
-                log.info('Created new resource {} for EID {}'.format(self._res_dict['id'], self._eid))
+                res_dict = self._outer._api.action.resource_create(
+                    package_id=self._outer['id'],
+                    ckanext_importer_resource_eid=self._eid,
+                )
+                self._outer['resources'].append(res_dict)
+                res = Resource(self._eid, res_dict, self._outer)
+                log.info('Created {}'.format(res))
+                return res
             elif len(res_dicts) > 1:
-                raise ValueError('Multiple resources for EID {}'.format(self._eid))
+                raise ValueError('Multiple resources for EID {} in {}'.format(self._eid, self._outer))
             else:
-                self._res_dict = res_dicts[0]
-                log.debug('Using existing resource {} for EID {}'.format(self._res_dict['id'], self._eid))
-            self._resource = Resource(self._outer, self._res_dict)
-
-        def _find_res(self):
-            return [res_dict for res_dict in self._outer._dict['resources']
-                    if res_dict['ckanext_importer_resource_eid'] == self._eid]
-
-        def _create_res(self):
-            self._res_dict = self._outer._api.action.resource_create(
-                package_id=self._outer['id'],
-                ckanext_importer_resource_eid=self._eid,
-            )
-            self._outer._dict['resources'].append(self._res_dict)
-
-        def __enter__(self):
-            return self._resource
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            if exc_type is not None:
-                log.error('Exception during synchronization of resource {} (EID {}): {}'.format(
-                    self._res_dict['id'], self._eid, exc_val))
-                log.error('Not synchronizing that resource.')
-                return
-            res = self._resource
-            if res.sync_mode == SyncMode.sync:
-                log.debug('Uploading updated version of resource {} (EID {})'.format(res['id'], self._eid))
-                self._upload()
-            elif res.sync_mode == SyncMode.dont_sync:
-                log.debug('Resource {} (EID {}) is marked as "dont sync"'.format(res['id'], self._eid))
-            elif res.sync_mode == SyncMode.delete:
-                log.debug('Resource {} (EID {}) is marked as "delete", removing it'.format(res['id'], self._eid))
-                self._delete()
-            else:
-                raise ValueError('Unknown sync mode {} for resource {} (EID {})'.format(
-                                 res.sync_mode, res['id'], self._eid))
-
-        def _upload(self):
-            '''
-            Upload the modified resource dict and propagate the changes.
-            '''
-            replace_dict(self._res_dict,
-                         self._outer._api.action.resource_update(**self._res_dict))
-
-        def _delete(self):
-            '''
-            Delete the resource and propagate the changes.
-            '''
-            id = self._res_dict['id']
-            self._outer._api.action.resource_delete(id=id)
-            self._outer._dict['resources'][:] = [r for r in self._outer._dict['resources']
-                                                 if r['id'] != id]
+                res = Resource(self._eid, res_dicts[0], self._outer)
+                log.debug('Using {}'.format(res))
+                return res
 
 
 class Resource(Entity):
@@ -281,117 +276,54 @@ class Resource(Entity):
 
     Do not instantiate directly, use ``Package.sync_resource`` instead.
     '''
-    def __init__(self, pkg, res_dict):
-        super(Resource, self).__init__(res_dict)
+    def __init__(self, eid, res_dict, pkg):
+        super(Resource, self).__init__(eid, res_dict)
         self._pkg = pkg
 
-    def __repr__(self):
-        return '<{} {}>'.format(self.__class__.__name__, self['id'])
+    def _delete(self):
+        id = self['id']
+        self._pkg._api.action.resource_delete(id=id)
+        self._pkg['resources'][:] = [r for r in self._pkg['resources']
+                                     if r['id'] != id]
+
+    def _upload(self):
+        '''
+        Upload the modified resource dict and propagate the changes.
+        '''
+        replace_dict(self, self._pkg._api.action.resource_update(**self))
+
+    def _get_views_map(self):
+        '''
+        Get the map of views for this resource.
+        '''
+        return json.loads(self.get('ckanext_importer_views', '{}'))
+
+    def _set_views_map(self, views):
+        '''
+        Set the map of views for this resource.
+        '''
+        self['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
 
     @context_manager_method
-    class sync_view(object):
-        # Currently there is no way to attach extras to views (see
-        # https://github.com/ckan/ckan/issues/2655), so we cannot
-        # simply store the view's EID in the view itself. Instead,
-        # we store that information in a separate resource extra.
-        def __init__(self, eid):
-            self._eid = unicode(eid)
-
-            views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
+    class sync_view(EntitySyncManager):
+        def _prepare_entity(self):
+            views = self._outer._get_views_map()
             try:
-                view_id = views[self._eid]
+                id = views[self._eid]
             except KeyError:
-                # Ideally, we'd like to create a new view here (like we do for
+               # Ideally, we'd like to create a new view here (like we do for
                 # packages and resources). However, CKAN's resource_view_create
                 # requires us to fix the view's type, and resource_view_update
                 # doesn't allow us to alter it afterwards. Hence we return an
                 # empty dict here and do the creation when entering the context
                 # manager.
                 log.debug('Delaying view creation for EID {}'.format(self._eid))
-                self._view_dict = {}
+                return View(self._eid, {}, self._outer)
             else:
-                self._view_dict = self._outer._pkg._api.action.resource_view_show(id=view_id)
-                log.debug('Using existing view {} for EID {}'.format(view_id, self._eid))
-            self._view = View(self._outer, self._view_dict)
-
-        def __enter__(self):
-            return self._view
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            view = self._view
-            id = view.get('id', None)
-            if exc_type is not None:
-                if id:
-                    log.error('Exception during synchronization of new view (EID {}): {}'.format(
-                              self._eid, exc_val))
-                else:
-                    log.error('Exception during synchronization of view {} (EID {}): {}'.format(
-                              id, self._eid, exc_val))
-                log.error('Not synchronizing that view.')
-                return
-            if view.sync_mode == SyncMode.sync:
-                if id:
-                    log.debug('Uploading updated version of view {} (EID {})'.format(view['id'], self._eid))
-                    self._upload()
-                else:
-                    log.debug('Creating view for EID {}'.format(self._eid))
-                    self._create()
-            elif view.sync_mode == SyncMode.dont_sync:
-                if id:
-                    log.debug('View {} (EID {}) is marked as "dont sync"'.format(view['id'], self._eid))
-                else:
-                    log.debug('New view (EID {}) is marked as "dont sync"'.format(self._eid))
-            elif view.sync_mode == SyncMode.delete:
-                if id:
-                    log.debug('View {} (EID {}) is marked as "delete", removing it'.format(view['id'], self._eid))
-                    self._delete()
-                else:
-                    log.debug('New view (EID {}) is marked as "delete", not creating it'.format(self._eid))
-            else:
-                raise ValueError('Unknown sync mode {} for view {} (EID {})'.format(
-                                 view.sync_mode, view['id'], self._eid))
-
-        def _upload(self):
-            '''
-            Upload the modified view dict.
-            '''
-            replace_dict(self._view_dict,
-                         self._outer._pkg._api.action.resource_view_update(**self._view_dict))
-
-        def _create(self):
-            '''
-            Create a view.
-            '''
-            self._view_dict['resource_id'] = self._outer['id']
-            replace_dict(self._view_dict,
-                         self._outer._pkg._api.action.resource_view_create(**self._view_dict))
-
-            # Register the view in the resource
-            views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
-            views[self._eid] = self._view_dict['id']
-            self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
-            # FIXME: This adds the view to the local res dict, but the
-            #         upstream res dict is only updated once the
-            #         sync_resource CM exits. If this doesn't happen (due
-            #         to an exception or a call to dont_sync) then we end
-            #         up with an already created view on the resource that
-            #         isn't properly tracked by ckanext.importer. At the
-            #         very least we should automatically discover such
-            #         stray views, better would be to prevent it in the
-            #         first place.
-
-            log.info('Created view {} for EID {}'.format(self._view_dict['id'], self._eid))
-
-        def _delete(self):
-            '''
-            Delete the view.
-            '''
-            self._outer._pkg._api.action.resource_view_delete(id=self._view_dict['id'])
-
-            # Unregister the view in the resource
-            views = json.loads(self._outer.get('ckanext_importer_views', '{}'))
-            views.pop(self._eid)
-            self._outer['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+                view_dict = self._outer._pkg._api.action.resource_view_show(id=id)
+                view = View(self._eid, view_dict, self._outer)
+                log.debug('Using {}'.format(view))
+                return view
 
 
 class View(Entity):
@@ -400,16 +332,52 @@ class View(Entity):
 
     Do not instantiate directly. Use ``Resource.sync_view`` instead.
     '''
-    def __init__(self, res, view_dict):
-        super(View, self).__init__(view_dict)
+
+    # FIXME: When we update the resource's ckanext_importer_views field
+    #         then the upstream res dict is only updated once the
+    #         sync_resource CM exits. If this doesn't happen (due
+    #         to an exception or a call to dont_sync) then we end
+    #         up with an already created/deleted view that isn't
+    #         properly tracked by ckanext.importer. At the very least we
+    #         should automatically discover such issues, better would be
+    #         to prevent them in the first place.
+
+    def __init__(self, eid, view_dict, res):
+        super(View, self).__init__(eid, view_dict)
         self._res = res
 
-    def __repr__(self):
+    def _upload(self):
         try:
             id = self['id']
         except KeyError:
-            return '<{} [to-be-created]>'.format(self.__class__.__name__)
-        return '<{} {}>'.format(self.__class__.__name__, id)
+            self._create()
+        else:
+            replace_dict(self,
+                         self._res._pkg._api.action.resource_view_update(**self))
+
+    def _create(self):
+        '''
+        Create a view.
+        '''
+        self['resource_id'] = self._res['id']
+        replace_dict(self,
+                     self._res._pkg._api.action.resource_view_create(**self))
+        # Register the view in the resource
+        views = self._res._get_views_map()
+        views[self._eid] = self['id']
+        self._res._set_views_map(views)
+
+    def _delete(self):
+        try:
+            id = self['id']
+        except KeyError:
+            # View has not been created yet
+            return
+        self._res._pkg._api.action.resource_view_delete(id=id)
+        # Unregister the view in the resource
+        views = self._res._get_views_map()
+        del views[self._eid]
+        self._res._set_views_map(views)
 
 
 class ExtrasDictView(collections.MutableMapping):

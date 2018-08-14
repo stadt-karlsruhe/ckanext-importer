@@ -22,6 +22,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import collections
 import logging
+import re
 
 import ckanapi
 
@@ -135,4 +136,14 @@ def replace_dict(old, new):
         raise ValueError('old and new point to the same object')
     old.clear()
     old.update(new)
+
+
+_SOLR_ESCAPE_RE = re.compile(r'(?<!\\)(?P<char>[&|+\-!(){}[/\]^"~*?:])')
+
+
+def solr_escape(s):
+    '''
+    Escape strings for Solr queries.
+    '''
+    return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
 

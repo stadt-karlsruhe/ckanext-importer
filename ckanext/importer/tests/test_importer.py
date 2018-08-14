@@ -34,15 +34,15 @@ import ckanapi
 class TestEntity(object):
 
     def test_default_sync_mode(self):
-        assert Entity({}).sync_mode == SyncMode.sync
+        assert Entity(0, {}).sync_mode == SyncMode.sync
 
     def test_delete(self):
-        e = Entity({})
+        e = Entity(0, {})
         e.delete()
         assert e.sync_mode == SyncMode.delete
 
     def test_dont_sync(self):
-        e = Entity({})
+        e = Entity(0, {})
         e.dont_sync()
         assert e.sync_mode == SyncMode.dont_sync
 
@@ -145,7 +145,7 @@ class TestImporter(object):
         assert pkg_id1 != pkg_id2
 
     def test_repr(self, imp):
-        assert repr(imp) == '<Importer {}>'.format(imp.id)
+        assert repr(imp) == '<Importer id={!r}>'.format(imp.id)
 
     def test_delete_new(self, api, imp):
         '''
@@ -307,7 +307,7 @@ class TestPackage(object):
         assert 'upload' not in pkg['resources'][0]
 
     def test_repr(self, pkg):
-        assert repr(pkg) == '<Package {}>'.format(pkg['id'])
+        assert repr(pkg) == '<Package id={!r} eid={!r}>'.format(pkg['id'], pkg._eid)
 
     def test_delete_new(self, api, pkg):
         '''
@@ -410,7 +410,7 @@ class TestResource(object):
             assert api.action.resource_view_show(id=id)['title'] == title
 
     def test_repr(self, res):
-        assert repr(res) == '<Resource {}>'.format(res['id'])
+        assert repr(res) == '<Resource id={!r} eid={!r}>'.format(res['id'], res._eid)
 
     def test_delete_new(self, api, res):
         '''
@@ -476,11 +476,12 @@ class TestResource(object):
 class TestView(object):
 
     def test_repr(self, res):
-        with res.sync_view('a') as view:
-            assert repr(view) == '<View [to-be-created]>'
+        eid = 'a'
+        with res.sync_view(eid) as view:
+            assert repr(view) == '<View eid={!r}>'.format(eid)
             view['view_type'] = 'text_view'
             view['title'] = 'title'
-        assert repr(view) == '<View {}>'.format(view['id'])
+        assert repr(view) == '<View id={!r} eid={!r}>'.format(view['id'], eid)
 
 
 class TestExtrasDictView(object):
