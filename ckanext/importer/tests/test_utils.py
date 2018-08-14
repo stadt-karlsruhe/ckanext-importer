@@ -101,16 +101,22 @@ class TestContextManagerMethod(object):
         assert repr(foo.cm) == '<context manager method Foo.cm of Foo(x)>'
 
 
-def test_replace_dict():
-    d1 = {1: 2, 3: 4}
-    d2 = d1
-    for d3 in [
-        {},
-        {5: 6},
-        {1: 2, 3: 4},
-    ]:
-        replace_dict(d1, d3)
-        assert d1 == d3
-        assert d2 is d1
-        assert d3 is not d1
+class TestReplaceDict(object):
 
+    def test_normal(self):
+        d1 = {1: 2, 3: 4}
+        d2 = d1
+        for d3 in [
+            {},
+            {5: 6},
+            {1: 2, 3: 4},
+        ]:
+            replace_dict(d1, d3)
+            assert d1 == d3
+            assert d2 is d1
+            assert d3 is not d1
+
+    def test_same_object(self):
+        d = {}
+        with pytest.raises(ValueError):
+            replace_dict(d, d)
