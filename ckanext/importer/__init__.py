@@ -23,10 +23,12 @@ from __future__ import (absolute_import, division, print_function,
 from copy import deepcopy
 import collections
 from enum import Enum
+from itertools import islice
 import json
 import logging
 
 import ckanapi
+from ckan.logic import NotFound
 
 from .utils import DictWrapper, context_manager_method, replace_dict, solr_escape
 
@@ -141,26 +143,41 @@ _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
-    def __init__(self, id, api=None, default_owner_org=None):
+    def __init__(self, id, api=None, default_owner_org=None, delete_unsynced=False):
         self.id = unicode(id)
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
+        self._delete_unsynced = delete_unsynced
+        self._synced_ids = set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # TODO: Error checking
+        if self._delete_unsynced:
+            for pkg_dict in self.find_packages():
+                if pkg_dict['id'] not in self._synced_ids:
+                    extras = ExtrasDictView(pkg_dict['extras'])
+                    eid = extras['ckanext_importer_package_eid']
+                    pkg = Package(eid, pkg_dict, self._api)
+                    log.debug('Deleting unsynced {}'.format(pkg))
+                    pkg._delete()
 
     @context_manager_method
     class sync_package(EntitySyncManager):
         def _prepare_entity(self):
-            pkg_dicts = self._find_pkgs()
-            if not pkg_dicts:
+            try:
+                pkg_dict = self._outer.find_package(self._eid)
+            except NotFound:
                 pkg_dict = self._create_pkg()
                 pkg = Package(self._eid, pkg_dict, self._outer._api)
                 log.debug('Created {}'.format(pkg))
-                return pkg
-            elif len(pkg_dicts) > 1:
-                raise ValueError('Multiple packages for EID {}'.format(self._eid))
             else:
-                pkg = Package(self._eid, pkg_dicts[0], self._outer._api)
+                pkg = Package(self._eid, pkg_dict, self._outer._api)
                 log.debug('Using {}'.format(pkg))
-                return pkg
+            self._outer._synced_ids.add(pkg['id'])
+            return pkg
 
         def _create_pkg(self):
             '''
@@ -190,31 +207,56 @@ class Importer(object):
                         continue
                     raise
 
-        def _find_pkgs(self):
-            '''
-            Find existing packages with the given EID.
-            '''
-            extras = {
-                'ckanext_importer_importer_id': solr_escape(self._outer.id),
-                'ckanext_importer_package_eid': solr_escape(self._eid),
-            }
-            fq = ' AND '.join('extras_{}:"{}"'.format(*item)
-                              for item in extras.items())
-            # FIXME: Support for paging
-            result = self._outer._api.action.package_search(fq=fq, rows=1000)
+    def find_packages(self, eid=None):
+        '''
+        Find existing packages for this importer.
 
-            # CKAN's search is based on Solr, which by default doesn't support
-            # searching for exact matches. Hence searching for importer ID "x"
-            # can also return packages with importer ID "x-y". Hence we filter
-            # the results again.
-            pkgs = []
-            for pkg in result['results']:
-                extras = ExtrasDictView(pkg['extras'])
-                if (extras['ckanext_importer_importer_id'] == self._outer.id and
-                    extras['ckanext_importer_package_eid'] == self._eid):
-                    pkgs.append(pkg)
+        Yields package dicts.
 
-            return pkgs
+        If ``eid`` is given, then only packages with that EID are returned.
+        '''
+        extras = {
+            'ckanext_importer_importer_id': solr_escape(self.id),
+        }
+        if eid is not None:
+            extras['ckanext_importer_package_eid'] = solr_escape(eid)
+        fq = ' AND '.join('extras_{}:"{}"'.format(*item)
+                          for item in extras.items())
+        # FIXME: Support for paging
+        result = self._api.action.package_search(fq=fq, rows=1000)
+
+        # CKAN's search is based on Solr, which by default doesn't support
+        # searching for exact matches. Hence searching for importer ID "x"
+        # can also return packages with importer ID "x-y". Hence we filter
+        # the results again.
+        for pkg_dict in result['results']:
+            extras = ExtrasDictView(pkg_dict['extras'])
+            if extras['ckanext_importer_importer_id'] != self.id:
+                continue
+            if eid is not None and extras['ckanext_importer_package_eid'] != eid:
+                continue
+            yield pkg_dict
+
+    def find_package(self, eid):
+        '''
+        Find an existing package for this importer.
+
+        ``eid`` is the EID of the package.
+
+        Returns the package dict.
+
+        Raises ``ckan.logic.NotFound`` if no package with that EID could
+        be found.
+
+        Raises ``RuntimeError`` if more than one package with the given
+        EID are found. This only happens with a corrupted database.
+        '''
+        pkg_dicts = list(islice(self.find_packages(eid), 2))
+        if not pkg_dicts:
+            raise NotFound('No package with EID {!r} exists for {}'.format(eid, self))
+        if len(pkg_dicts) > 1:
+            raise RuntimeError('Multiple packages with EID {!r} found for {}'.format(eid, self))
+        return pkg_dicts[0]
 
     def __repr__(self):
         return '<{} id={!r}>'.format(self.__class__.__name__, self.id)

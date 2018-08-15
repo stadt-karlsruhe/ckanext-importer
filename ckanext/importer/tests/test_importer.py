@@ -25,8 +25,10 @@ import StringIO
 import pytest
 import mock
 
-from ckanext.importer import Entity, ExtrasDictView, Importer
 import ckanapi
+import ckan.logic
+
+from ckanext.importer import Entity, ExtrasDictView, Importer
 
 
 # See conftest.py for the definition of the pytest fixtures
@@ -101,7 +103,7 @@ class TestImporter(object):
                   {'key': 'ckanext_importer_package_eid', 'value': eid}]
         pkg1 = api.action.package_create(name='pkg1', extras=extras)
         pkg2 = api.action.package_create(name='pkg2', extras=extras)
-        with pytest.raises(ValueError):
+        with pytest.raises(RuntimeError):
             with imp.sync_package(eid) as pkg:
                 pass
 
@@ -140,13 +142,13 @@ class TestImporter(object):
         '''
         Test that different importers can use the same package EID.
         '''
-        imp1 = imp_factory(id='test-importer-1')
-        imp2 = imp_factory(id='test-importer-2')
         eid = 'shared-eid'
-        with imp1.sync_package(eid) as pkg:
-            pkg_id1 = pkg['id']
-        with imp2.sync_package(eid) as pkg:
-            pkg_id2 = pkg['id']
+        with imp_factory(id='test-importer-1') as imp1:
+            with imp1.sync_package(eid) as pkg:
+                pkg_id1 = pkg['id']
+        with imp_factory(id='test-importer-2') as imp2:
+            with imp2.sync_package(eid) as pkg:
+                pkg_id2 = pkg['id']
         assert pkg_id1 != pkg_id2
 
     def test_repr(self, imp):
@@ -179,6 +181,64 @@ class TestImporter(object):
         with pytest.raises(ckanapi.NotFound):
             api.action.package_show(id=id_x)
         api.action.package_show(id=id_y)
+
+    def test_delete_unsynced_packages(self, api, imp_factory):
+        '''
+        Test deletion of unsynced packages.
+        '''
+        importer_id = 'importer-id'
+        eids = [unicode(i) for i in range(7)]
+        ids = {}
+        with imp_factory(importer_id) as imp:
+            for eid in eids:
+                with imp.sync_package(eid) as pkg:
+                    ids[eid] = pkg['id']
+        with imp_factory(importer_id, delete_unsynced=True) as imp:
+            with imp.sync_package(eids[1]) as pkg:
+                # Sync with changes
+                pkg['title'] = 'A new title'
+            with imp.sync_package(eids[3]) as pkg:
+                # Sync without any changes
+                pass
+            with imp.sync_package(eids[5]) as pkg:
+                # Delete
+                pkg.delete()
+        for eid in '0', '2', '4', '6':
+            with pytest.raises(ckanapi.NotFound):
+                api.action.package_show(id=ids[eid])
+        for eid in '1', '3':
+            api.action.package_show(id=ids[eid])
+
+    def test_find_packages(self, api, imp):
+        def extras(eid):
+            return [{'key': 'ckanext_importer_importer_id', 'value': imp.id},
+                    {'key': 'ckanext_importer_package_eid', 'value': eid}]
+        assert list(imp.find_packages()) == []
+        id1 = api.action.package_create(name='p1', extras=extras('a'))['id']
+        assert {p['id'] for p in imp.find_packages()} == {id1}
+        assert {p['id'] for p in imp.find_packages('a')} == {id1}
+        id2 = api.action.package_create(name='p2', extras=extras('b'))['id']
+        assert {p['id'] for p in imp.find_packages()} == {id1, id2}
+        assert {p['id'] for p in imp.find_packages('a')} == {id1}
+        assert {p['id'] for p in imp.find_packages('b')} == {id2}
+        id3 = api.action.package_create(name='p3', extras=extras('a'))['id']
+        assert {p['id'] for p in imp.find_packages()} == {id1, id2, id3}
+        assert {p['id'] for p in imp.find_packages('a')} == {id1, id3}
+        assert {p['id'] for p in imp.find_packages('b')} == {id2}
+
+    def test_find_package(self, api, imp):
+        def extras(eid):
+            return [{'key': 'ckanext_importer_importer_id', 'value': imp.id},
+                    {'key': 'ckanext_importer_package_eid', 'value': eid}]
+        with pytest.raises(ckan.logic.NotFound):
+            imp.find_package('some-eid')
+        id1 = api.action.package_create(name='p1', extras=extras('a'))['id']
+        assert imp.find_package('a')['id'] == id1
+        with pytest.raises(ckan.logic.NotFound):
+            imp.find_package('some-eid')
+        api.action.package_create(name='p2', extras=extras('a'))['id']
+        with pytest.raises(RuntimeError):
+            imp.find_package('a')
 
 
 class TestPackage(object):

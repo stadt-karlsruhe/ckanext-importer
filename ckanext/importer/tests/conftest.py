@@ -158,7 +158,8 @@ def imp(imp_factory):
     Once the test case is finished, the CKAN DB is reset and the search
     index is rebuilt.
     '''
-    return imp_factory()
+    with imp_factory() as imp:
+        yield imp
 
 
 @pytest.fixture
