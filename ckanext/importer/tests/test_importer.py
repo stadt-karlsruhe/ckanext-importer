@@ -25,27 +25,11 @@ import StringIO
 import pytest
 import mock
 
-from ckanext.importer import Entity, ExtrasDictView, Importer, SyncMode
+from ckanext.importer import Entity, ExtrasDictView, Importer
 import ckanapi
 
 
 # See conftest.py for the definition of the pytest fixtures
-
-
-class TestEntity(object):
-
-    def test_default_sync_mode(self):
-        assert Entity(0, {}).sync_mode == SyncMode.sync
-
-    def test_delete(self):
-        e = Entity(0, {})
-        e.delete()
-        assert e.sync_mode == SyncMode.delete
-
-    def test_dont_sync(self):
-        e = Entity(0, {})
-        e.dont_sync()
-        assert e.sync_mode == SyncMode.dont_sync
 
 
 class TestImporter(object):
@@ -195,32 +179,6 @@ class TestImporter(object):
         with pytest.raises(ckanapi.NotFound):
             api.action.package_show(id=id_x)
         api.action.package_show(id=id_y)
-
-    def test_dont_sync_during_package_creation(self, api, imp):
-        '''
-        Test not syncing a new package.
-        '''
-        with imp.sync_package('x') as pkg:
-            id = pkg['id']
-            pkg_dict = api.action.package_show(id=id)
-            pkg['title'] = 'A new title'
-            pkg.extras['foo'] = 'bar'
-            pkg.dont_sync()
-        assert api.action.package_show(id=id) == pkg_dict
-
-    def test_dont_sync_during_package_update(self, api, imp):
-        '''
-        Test not syncing an existing package.
-        '''
-        with imp.sync_package('x'):
-            pass
-        with imp.sync_package('x') as pkg:
-            id = pkg['id']
-            pkg_dict = api.action.package_show(id=id)
-            pkg['title'] = 'A new title'
-            pkg.extras['foo'] = 'bar'
-            pkg.dont_sync()
-        assert api.action.package_show(id=id) == pkg_dict
 
 
 class TestPackage(object):
@@ -473,30 +431,6 @@ class TestPackage(object):
         pkg_dict = api.action.package_show(id=pkg['id'])
         assert [res['id'] for res in pkg_dict['resources']] == [id_a, id_c]
 
-    def test_dont_sync_during_resource_creation(self, api, pkg):
-        '''
-        Test not syncing a new resource.
-        '''
-        with pkg.sync_resource('a') as res:
-            id = res['id']
-            res_dict = api.action.resource_show(id=id)
-            res['name'] = 'A new name'
-            res.dont_sync()
-        assert api.action.resource_show(id=id) == res_dict
-
-    def test_dont_sync_during_resource_update(self, api, pkg):
-        '''
-        Test not syncing an existing resource.
-        '''
-        with pkg.sync_resource('a') as res:
-            pass
-        with pkg.sync_resource('a') as res:
-            id = res['id']
-            res_dict = api.action.resource_show(id=id)
-            res['name'] = 'A new name'
-            res.dont_sync()
-        assert api.action.resource_show(id=id) == res_dict
-
 
 class TestResource(object):
 
@@ -592,33 +526,6 @@ class TestResource(object):
             view.delete()
         views = api.action.resource_view_list(id=res['id'])
         assert [view['id'] for view in views] == [id_a, id_c]
-
-    def test_dont_sync_during_view_creation(self, api, res):
-        '''
-        Test not syncing a new view.
-        '''
-        with res.sync_view('a') as view:
-            view['title'] = 'a'
-            view['view_type'] = 'text_view'
-        id_a = view['id']
-        with res.sync_view('b') as view:
-            view.dont_sync()
-        views = api.action.resource_view_list(id=res['id'])
-        assert [view['id'] for view in views] == [id_a]
-
-    def test_dont_sync_during_view_update(self, api, res):
-        '''
-        Test not syncing an existing view.
-        '''
-        with res.sync_view('a') as view:
-            view['title'] = 'a'
-            view['view_type'] = 'text_view'
-        id = view['id']
-        view_dict = api.action.resource_view_show(id=id)
-        with res.sync_view('a') as view:
-            view['title'] = 'A new title'
-            view.dont_sync()
-        assert api.action.resource_view_show(id=id) == view_dict
 
 
 class TestView(object):

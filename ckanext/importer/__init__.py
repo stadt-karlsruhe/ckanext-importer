@@ -37,15 +37,6 @@ __version__ = '0.1.0'
 log = logging.getLogger(__name__)
 
 
-class SyncMode(Enum):
-    '''
-    How to sync a package, resource, or view.
-    '''
-    sync = 1       # Sync normally
-    dont_sync = 2  # Don't sync (keep the existing version)
-    delete = 3     # Delete the existing version
-
-
 class Entity(DictWrapper):
     '''
     Base class for package, resource, and view wrappers.
@@ -61,7 +52,7 @@ class Entity(DictWrapper):
         super(Entity, self).__init__(d)
         self._eid = eid
         self._mark_as_unmodified()
-        self.sync_mode = SyncMode.sync
+        self._to_be_deleted = False
 
     def _mark_as_unmodified(self):
         '''
@@ -79,13 +70,7 @@ class Entity(DictWrapper):
         '''
         Mark this entity for deletion.
         '''
-        self.sync_mode = SyncMode.delete
-
-    def dont_sync(self):
-        '''
-        Mark this entity for no synchronization.
-        '''
-        self.sync_mode = SyncMode.dont_sync
+        self._to_be_deleted = True
 
     def _delete(self):
         '''
@@ -142,19 +127,14 @@ class EntitySyncManager(object):
                       exc_info=(exc_type, exc_val, exc_tb))
             log.error('Changes to {} will not be uploaded'.format(entity))
             return
-        if entity.sync_mode == SyncMode.sync:
-            if entity._is_modified():
-                log.debug('Uploading {}'.format(entity))
-                entity._upload()
-            else:
-                log.debug('{} has not been modified'.format(entity))
-        elif entity.sync_mode == SyncMode.dont_sync:
-            log.debug('{} is marked as "dont sync"'.format(entity))
-        elif entity.sync_mode == SyncMode.delete:
-            log.debug('{} is marked as "delete", removing it'.format(entity))
+        if entity._to_be_deleted:
+            log.debug('{} is marked for deletion, removing it'.format(entity))
             entity._delete()
+        elif entity._is_modified():
+            log.debug('Uploading {}'.format(entity))
+            entity._upload()
         else:
-            raise ValueError('Unknown sync mode {} for {}'.format(entity.sync_mode, entity))
+            log.debug('{} has not been modified'.format(entity))
 
 
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
