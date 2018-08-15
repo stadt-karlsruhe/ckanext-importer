@@ -20,6 +20,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from copy import deepcopy
 import collections
 from enum import Enum
 import json
@@ -59,7 +60,20 @@ class Entity(DictWrapper):
         '''
         super(Entity, self).__init__(d)
         self._eid = eid
+        self._mark_as_unmodified()
         self.sync_mode = SyncMode.sync
+
+    def _mark_as_unmodified(self):
+        '''
+        Mark this entity as unmodified.
+        '''
+        self._original_dict = deepcopy(self._dict)
+
+    def _is_modified(self):
+        '''
+        Check if this entity has been modified.
+        '''
+        return self._original_dict != self._dict
 
     def delete(self):
         '''
@@ -106,8 +120,6 @@ class EntitySyncManager(object):
     '''
     def __init__(self, eid):
         self._eid = unicode(eid)
-        self._entity = self._prepare_entity()
-        assert self._entity is not None
 
     def _prepare_entity(self):
         '''
@@ -119,6 +131,8 @@ class EntitySyncManager(object):
         raise NotImplementedError()
 
     def __enter__(self):
+        self._entity = self._prepare_entity()
+        assert self._entity is not None
         return self._entity
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -129,8 +143,11 @@ class EntitySyncManager(object):
             log.error('Changes to {} will not be uploaded'.format(entity))
             return
         if entity.sync_mode == SyncMode.sync:
-            log.debug('Uploading {}'.format(entity))
-            entity._upload()
+            if entity._is_modified():
+                log.debug('Uploading {}'.format(entity))
+                entity._upload()
+            else:
+                log.debug('{} has not been modified'.format(entity))
         elif entity.sync_mode == SyncMode.dont_sync:
             log.debug('{} is marked as "dont sync"'.format(entity))
         elif entity.sync_mode == SyncMode.delete:
@@ -269,6 +286,20 @@ class Package(Entity):
                 log.debug('Using {}'.format(res))
                 return res
 
+        def __enter__(self):
+            self._pkg_is_modified = self._outer._is_modified()
+            # FIXME: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
+            return EntitySyncManager.__enter__(self)
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            # FIXME: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
+            EntitySyncManager.__exit__(self, exc_type, exc_val, exc_tb)
+            if not self._pkg_is_modified:
+                # If the package was previously unmodified we mark it
+                # as unmodified again, since changes in the resource
+                # have already been uploaded (but their propagation to
+                # the package dict has marked the package as modified).
+                self._outer._mark_as_unmodified()
 
 class Resource(Entity):
     '''

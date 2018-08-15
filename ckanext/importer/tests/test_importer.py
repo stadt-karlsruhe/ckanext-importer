@@ -23,6 +23,7 @@ from __future__ import (absolute_import, division, print_function,
 import StringIO
 
 import pytest
+import mock
 
 from ckanext.importer import Entity, ExtrasDictView, Importer, SyncMode
 import ckanapi
@@ -96,7 +97,7 @@ class TestImporter(object):
                 ids.add(pkg['id'])
         assert len(ids) == len(eids)
 
-    def test_package_creation_default_names(self, imp):
+    def test_default_names_generation_during_package_creation(self, imp):
         '''
         Test default name generation for multiple packages.
         '''
@@ -107,7 +108,7 @@ class TestImporter(object):
                 names.add(pkg['name'])
         assert len(names) == n
 
-    def test_multiple_packages_same_importer_id_same_eid(self, api, imp):
+    def test_multiple_packages_with_the_same_importer_id_and_the_same_eid(self, api, imp):
         '''
         Test multiple packages with the same import ID and EID.
         '''
@@ -131,7 +132,27 @@ class TestImporter(object):
                 id = pkg['id']
             assert api.action.package_show(id=id)['title'] == title
 
-    def test_different_importer_ids_same_package_eid(self, imp_factory):
+    def test_unmodified_package_creation(self, imp):
+        '''
+        Test not modifying a new package.
+        '''
+        with mock.patch('ckanext.importer.Package._upload') as upload:
+            with imp.sync_package('x'):
+                pass
+            upload.assert_not_called()
+
+    def test_unmodified_package_update(self, imp):
+        '''
+        Test not modifying an existing package.
+        '''
+        with imp.sync_package('x') as pkg:
+            pkg['title'] = 'Foobar'
+        with mock.patch('ckanext.importer.Package._upload') as upload:
+            with imp.sync_package('x'):
+                pass
+            upload.assert_not_called()
+
+    def test_different_importer_ids_with_the_same_package_eid(self, imp_factory):
         '''
         Test that different importers can use the same package EID.
         '''
@@ -147,7 +168,7 @@ class TestImporter(object):
     def test_repr(self, imp):
         assert repr(imp) == '<Importer id={!r}>'.format(imp.id)
 
-    def test_delete_new(self, api, imp):
+    def test_delete_during_package_creation(self, api, imp):
         '''
         Test deletion of a new package.
         '''
@@ -160,7 +181,7 @@ class TestImporter(object):
             api.action.package_show(id=id_x)
         api.action.package_show(id=id_y)
 
-    def test_delete_existing(self, api, imp):
+    def test_delete_during_package_update(self, api, imp):
         '''
         Test deletion of an existing package.
         '''
@@ -175,7 +196,7 @@ class TestImporter(object):
             api.action.package_show(id=id_x)
         api.action.package_show(id=id_y)
 
-    def test_dont_sync_new(self, api, imp):
+    def test_dont_sync_during_package_creation(self, api, imp):
         '''
         Test not syncing a new package.
         '''
@@ -187,7 +208,7 @@ class TestImporter(object):
             pkg.dont_sync()
         assert api.action.package_show(id=id) == pkg_dict
 
-    def test_dont_sync_existing(self, api, imp):
+    def test_dont_sync_during_package_update(self, api, imp):
         '''
         Test not syncing an existing package.
         '''
@@ -242,7 +263,7 @@ class TestPackage(object):
         # Check that the cached package dict has been updated
         assert pkg['resources'][0]['name'] == name
 
-    def test_multiple_resources_same_eid(self, api, imp):
+    def test_multiple_resources_with_the_same_eid(self, api, imp):
         '''
         Test multiple resources with the same EID.
         '''
@@ -306,10 +327,125 @@ class TestPackage(object):
         # package dict
         assert 'upload' not in pkg['resources'][0]
 
+    def test_unmodified_resource_creation(self, pkg):
+        '''
+        Test not modifying a new resource.
+        '''
+        with mock.patch('ckanext.importer.Resource._upload') as upload:
+            with pkg.sync_resource('x'):
+                pass
+            upload.assert_not_called()
+
+    def test_unmodified_resource_update(self, pkg):
+        '''
+        Test not modifying an existing resource.
+        '''
+        with pkg.sync_resource('x') as res:
+            res['name'] = 'Foobar'
+        with mock.patch('ckanext.importer.Resource._upload') as upload:
+            with pkg.sync_resource('x'):
+                pass
+            upload.assert_not_called()
+
+    def test_resource_creation_during_unmodified_package_creation(self, api, imp):
+        '''
+        Test not modifying a new package aside from creating a resource.
+
+        Creating the resource changes the cached package dict but should
+        not trigger a package upload on its own.
+        '''
+        with mock.patch('ckanext.importer.Package._upload') as upload:
+            with imp.sync_package('x') as pkg:
+                with pkg.sync_resource('y') as res:
+                    id = res['id']
+            upload.assert_not_called()
+        api.action.resource_show(id=id)
+
+    def test_resource_creation_during_unmodified_package_update(self, api, imp):
+        '''
+        Test not modifying an existing package aside from creating a resource.
+
+        Creating the resource changes the cached package dict but should
+        not trigger a package upload on its own.
+        '''
+        with imp.sync_package('x'):
+            pass
+        with mock.patch('ckanext.importer.Package._upload') as upload:
+            with imp.sync_package('x') as pkg:
+                with pkg.sync_resource('y') as res:
+                    id = res['id']
+            upload.assert_not_called()
+        api.action.resource_show(id=id)
+
+    def test_resource_update_during_unmodified_package_update(self, api, imp):
+        '''
+        Test not modifying an existing package aside from updating a resource.
+
+        Updating the resource changes the cached package dict but should
+        not trigger a package upload on its own.
+        '''
+        with imp.sync_package('x') as pkg:
+            with pkg.sync_resource('y'):
+                pass
+        with mock.patch('ckanext.importer.Package._upload') as upload:
+            with imp.sync_package('x') as pkg:
+                with pkg.sync_resource('y') as res:
+                    id = res['id']
+                    res['name'] = 'foobar'
+            upload.assert_not_called()
+        assert api.action.resource_show(id=id)['name'] == 'foobar'
+
+    def test_resource_creation_during_modified_package_creation(self, api, imp):
+        '''
+        Test modifying a new package before creating a resource.
+
+        The code that prevents packages which are unmodified aside from
+        the resource creation from being uploaded should not prevent the
+        upload in this case.
+        '''
+        with imp.sync_package('x') as pkg:
+            pkg['title'] = 'Title'
+            with pkg.sync_resource('y'):
+                pass
+        assert api.action.package_show(id=pkg['id'])['title'] == 'Title'
+
+    def test_resource_creation_during_modified_package_update(self, api, imp):
+        '''
+        Test modifying an existing package before creating a resource.
+
+        The code that prevents packages which are unmodified aside from
+        the resource creation from being uploaded should not prevent the
+        upload in this case.
+        '''
+        with imp.sync_package('x'):
+            pass
+        with imp.sync_package('x') as pkg:
+            pkg['title'] = 'Title'
+            with pkg.sync_resource('y'):
+                pass
+        assert api.action.package_show(id=pkg['id'])['title'] == 'Title'
+
+    def test_resource_update_during_modified_package_update(self, api, imp):
+        '''
+        Test modifying an existing package before updating a resource.
+
+        The code that prevents packages which are unmodified aside from
+        the resource creation from being uploaded should not prevent the
+        upload in this case.
+        '''
+        with imp.sync_package('x') as pkg:
+            with pkg.sync_resource('y'):
+                pass
+        with imp.sync_package('x') as pkg:
+            pkg['title'] = 'Title'
+            with pkg.sync_resource('y') as res:
+                res['name'] = 'foobar'
+        assert api.action.package_show(id=pkg['id'])['title'] == 'Title'
+
     def test_repr(self, pkg):
         assert repr(pkg) == '<Package id={!r} eid={!r}>'.format(pkg['id'], pkg._eid)
 
-    def test_delete_new(self, api, pkg):
+    def test_delete_during_resource_creation(self, api, pkg):
         '''
         Test deletion of a new resource.
         '''
@@ -322,7 +458,7 @@ class TestPackage(object):
             api.action.resource_show(id=id_b)
         api.action.resource_show(id=id_a)
 
-    def test_delete_existing(self, api, pkg):
+    def test_delete_during_resource_update(self, api, pkg):
         '''
         Test deletion of an existing resource.
         '''
@@ -337,7 +473,7 @@ class TestPackage(object):
         pkg_dict = api.action.package_show(id=pkg['id'])
         assert [res['id'] for res in pkg_dict['resources']] == [id_a, id_c]
 
-    def test_dont_sync_new(self, api, pkg):
+    def test_dont_sync_during_resource_creation(self, api, pkg):
         '''
         Test not syncing a new resource.
         '''
@@ -348,7 +484,7 @@ class TestPackage(object):
             res.dont_sync()
         assert api.action.resource_show(id=id) == res_dict
 
-    def test_dont_sync_existing(self, api, pkg):
+    def test_dont_sync_during_resource_update(self, api, pkg):
         '''
         Test not syncing an existing resource.
         '''
@@ -409,10 +545,22 @@ class TestResource(object):
                 view['title'] = title
             assert api.action.resource_view_show(id=id)['title'] == title
 
+    def test_unmodified_view_update(self, res):
+        '''
+        Test not modifying an existing view.
+        '''
+        with res.sync_view('x') as view:
+            view['view_type'] = 'text_view'
+            view['title'] = 'Title'
+        with mock.patch('ckanext.importer.View._upload') as upload:
+            with res.sync_view('x'):
+                pass
+            upload.assert_not_called()
+
     def test_repr(self, res):
         assert repr(res) == '<Resource id={!r} eid={!r}>'.format(res['id'], res._eid)
 
-    def test_delete_new(self, api, res):
+    def test_delete_during_view_creation(self, api, res):
         '''
         Test deletion of a new view.
         '''
@@ -425,7 +573,7 @@ class TestResource(object):
         views = api.action.resource_view_list(id=res['id'])
         assert [view['id'] for view in views] == [id_a]
 
-    def test_delete_existing(self, api, res):
+    def test_delete_during_view_update(self, api, res):
         '''
         Test deletion of an existing view.
         '''
@@ -445,7 +593,7 @@ class TestResource(object):
         views = api.action.resource_view_list(id=res['id'])
         assert [view['id'] for view in views] == [id_a, id_c]
 
-    def test_dont_sync_new(self, api, res):
+    def test_dont_sync_during_view_creation(self, api, res):
         '''
         Test not syncing a new view.
         '''
@@ -458,7 +606,7 @@ class TestResource(object):
         views = api.action.resource_view_list(id=res['id'])
         assert [view['id'] for view in views] == [id_a]
 
-    def test_dont_sync_existing(self, api, res):
+    def test_dont_sync_during_view_update(self, api, res):
         '''
         Test not syncing an existing view.
         '''
