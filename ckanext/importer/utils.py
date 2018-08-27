@@ -146,4 +146,3 @@ def solr_escape(s):
     Escape strings for Solr queries.
     '''
     return _SOLR_ESCAPE_RE.sub(r'\\\g<char>', s)
-

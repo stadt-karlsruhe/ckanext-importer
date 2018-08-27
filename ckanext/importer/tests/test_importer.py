@@ -20,6 +20,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+import logging
 import StringIO
 
 import pytest
@@ -243,6 +244,28 @@ class TestImporter(object):
         api.action.package_create(name='p2', extras=extras('a'))['id']
         with pytest.raises(RuntimeError):
             imp.find_package('a')
+
+    def test_logging_prefix(self, imp):
+        '''
+        Test that log messages are prefixed with the importer ID.
+        '''
+        with mock.patch('ckanext.importer.logging.Logger.handle') as handle:
+            imp._log.debug('x')
+            imp._log.info('x')
+            imp._log.warning('x')
+            imp._log.error('x')
+            imp._log.critical('x')
+            try:
+                raise ValueError('oops')
+            except ValueError:
+                imp._log.exception('x')
+            for level in (logging.DEBUG, logging.INFO, logging.WARNING,
+                          logging.ERROR, logging.CRITICAL):
+                imp._log.log(level, 'x')
+            assert handle.call_count == 11
+            prefix = 'Importer {!r}: '.format(imp.id)
+            for call_args in handle.call_args_list:
+                assert call_args[0][0].msg.startswith(prefix)
 
 
 class TestPackage(object):
