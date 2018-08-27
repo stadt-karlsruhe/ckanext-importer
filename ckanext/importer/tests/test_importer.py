@@ -143,12 +143,12 @@ class TestImporter(object):
         Test that different importers can use the same package EID.
         '''
         eid = 'shared-eid'
-        with imp_factory(id='test-importer-1') as imp1:
-            with imp1.sync_package(eid) as pkg:
-                pkg_id1 = pkg['id']
-        with imp_factory(id='test-importer-2') as imp2:
-            with imp2.sync_package(eid) as pkg:
-                pkg_id2 = pkg['id']
+        imp1 = imp_factory(id='test-importer-1')
+        with imp1.sync_package(eid) as pkg:
+            pkg_id1 = pkg['id']
+        imp2 = imp_factory(id='test-importer-2')
+        with imp2.sync_package(eid) as pkg:
+            pkg_id2 = pkg['id']
         assert pkg_id1 != pkg_id2
 
     def test_repr(self, imp):
@@ -187,26 +187,30 @@ class TestImporter(object):
         Test deletion of unsynced packages.
         '''
         importer_id = 'importer-id'
-        eids = [unicode(i) for i in range(7)]
+        eids = [unicode(i) for i in range(9)]
         ids = {}
-        with imp_factory(importer_id) as imp:
-            for eid in eids:
-                with imp.sync_package(eid) as pkg:
-                    ids[eid] = pkg['id']
-        with imp_factory(importer_id, delete_unsynced=True) as imp:
-            with imp.sync_package(eids[1]) as pkg:
-                # Sync with changes
-                pkg['title'] = 'A new title'
-            with imp.sync_package(eids[3]) as pkg:
-                # Sync without any changes
-                pass
-            with imp.sync_package(eids[5]) as pkg:
-                # Delete
-                pkg.delete()
-        for eid in '0', '2', '4', '6':
+        imp = imp_factory(importer_id)
+        for eid in eids:
+            with imp.sync_package(eid) as pkg:
+                ids[eid] = pkg['id']
+        imp = imp_factory(importer_id)
+        with imp.sync_package(eids[1]) as pkg:
+            # Sync with changes
+            pkg['title'] = 'A new title'
+        with imp.sync_package(eids[3]) as pkg:
+            # Sync without any changes
+            pass
+        with imp.sync_package(eids[5]) as pkg:
+            # Error
+            raise ValueError('Oops')
+        with imp.sync_package(eids[7]) as pkg:
+            # Delete
+            pkg.delete()
+        imp.delete_unsynced_packages()
+        for eid in '02468':
             with pytest.raises(ckanapi.NotFound):
                 api.action.package_show(id=ids[eid])
-        for eid in '1', '3':
+        for eid in '135':
             api.action.package_show(id=ids[eid])
 
     def test_find_packages(self, api, imp):
@@ -491,6 +495,37 @@ class TestPackage(object):
         pkg_dict = api.action.package_show(id=pkg['id'])
         assert [res['id'] for res in pkg_dict['resources']] == [id_a, id_c]
 
+    def test_delete_unsynced_resources(self, api, imp):
+        '''
+        Test deletion of unsynced resources.
+        '''
+        pkg_eid = 'x'
+        res_eids = [unicode(i) for i in range(9)]
+        res_ids = {}
+        with imp.sync_package(pkg_eid) as pkg:
+            for res_eid in res_eids:
+                with pkg.sync_resource(res_eid) as res:
+                    res_ids[res_eid] = res['id']
+        with imp.sync_package(pkg_eid) as pkg:
+            with pkg.sync_resource(res_eids[1]) as res:
+                # Sync with changes
+                res['name'] = 'A new name'
+            with pkg.sync_resource(res_eids[3]) as res:
+                # Sync without any changes
+                pass
+            with pkg.sync_resource(res_eids[5]) as res:
+                # Error
+                raise ValueError('Oops')
+            with pkg.sync_resource(res_eids[7]) as res:
+                # Delete
+                res.delete()
+            pkg.delete_unsynced_resources()
+        for res_eid in '02468':
+            with pytest.raises(ckanapi.NotFound):
+                api.action.resource_show(id=res_ids[res_eid])
+        for res_eid in '135':
+            api.action.resource_show(id=res_ids[res_eid])
+
 
 class TestResource(object):
 
@@ -586,6 +621,39 @@ class TestResource(object):
             view.delete()
         views = api.action.resource_view_list(id=res['id'])
         assert [view['id'] for view in views] == [id_a, id_c]
+
+    def test_delete_unsynced_views(self, api, pkg):
+        '''
+        Test deletion of unsynced views.
+        '''
+        res_eid = 'x'
+        view_eids = [unicode(i) for i in range(9)]
+        view_ids = {}
+        with pkg.sync_resource(res_eid) as res:
+            for view_eid in view_eids:
+                with res.sync_view(view_eid) as view:
+                    view['title'] = 'title'
+                    view['view_type'] = 'text_view'
+                view_ids[view_eid] = view['id']
+        with pkg.sync_resource(res_eid) as res:
+            with res.sync_view(view_eids[1]) as view:
+                # Sync with changes
+                view['title'] = 'A new title'
+            with res.sync_view(view_eids[3]) as view:
+                # Sync without any changes
+                pass
+            with res.sync_view(view_eids[5]) as view:
+                # Error
+                raise ValueError('Oops')
+            with res.sync_view(view_eids[7]) as view:
+                # Delete
+                view.delete()
+            res.delete_unsynced_views()
+        for view_eid in '02468':
+            with pytest.raises(ckanapi.NotFound):
+                api.action.resource_view_show(id=view_ids[view_eid])
+        for view_eid in '135':
+            api.action.resource_view_show(id=view_ids[view_eid])
 
 
 class TestView(object):

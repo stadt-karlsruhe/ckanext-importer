@@ -45,16 +45,18 @@ class Entity(DictWrapper):
 
     Not to be instantiated directly.
     '''
-    def __init__(self, eid, d):
+    def __init__(self, eid, data_dict, parent=None):
         '''
         Constructor.
 
         ``d`` is the dict wrapped by this entity.
         '''
-        super(Entity, self).__init__(d)
+        super(Entity, self).__init__(data_dict)
         self._eid = eid
+        self._parent = parent
         self._mark_as_unmodified()
         self._to_be_deleted = False
+        self._synced_child_eids = set()
 
     def _mark_as_unmodified(self):
         '''
@@ -90,6 +92,13 @@ class Entity(DictWrapper):
         '''
         raise NotImplementedError()
 
+    def _mark_as_synced(self):
+        '''
+        Mark this entity as synced in the parent entity.
+        '''
+        if self._parent is not None:
+            self._parent._synced_child_eids.add(self._eid)
+
     def __repr__(self):
         try:
             id_part = 'id={!r} '.format(self['id'])
@@ -120,6 +129,7 @@ class EntitySyncManager(object):
     def __enter__(self):
         self._entity = self._prepare_entity()
         assert self._entity is not None
+        self._entity._mark_as_synced()
         return self._entity
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -128,7 +138,7 @@ class EntitySyncManager(object):
             log.error('An error occured during the synchronization of {}: {}'.format(entity, exc_val),
                       exc_info=(exc_type, exc_val, exc_tb))
             log.error('Changes to {} will not be uploaded'.format(entity))
-            return
+            return True  # Swallow exception
         if entity._to_be_deleted:
             log.debug('{} is marked for deletion, removing it'.format(entity))
             entity._delete()
@@ -143,40 +153,37 @@ _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
-    def __init__(self, id, api=None, default_owner_org=None, delete_unsynced=False):
+    def __init__(self, id, api=None, default_owner_org=None):
         self.id = unicode(id)
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
-        self._delete_unsynced = delete_unsynced
-        self._synced_ids = set()
+        self._synced_child_eids = set()
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # TODO: Error checking
-        if self._delete_unsynced:
-            for pkg_dict in self.find_packages():
-                if pkg_dict['id'] not in self._synced_ids:
-                    extras = ExtrasDictView(pkg_dict['extras'])
-                    eid = extras['ckanext_importer_package_eid']
-                    pkg = Package(eid, pkg_dict, self._api)
-                    log.debug('Deleting unsynced {}'.format(pkg))
-                    pkg._delete()
+    def delete_unsynced_packages(self):
+        '''
+        Delete packages that have not been synced.
+        '''
+        for pkg_dict in self.find_packages():
+            extras = ExtrasDictView(pkg_dict['extras'])
+            eid = extras['ckanext_importer_package_eid']
+            if eid not in self._synced_child_eids:
+                pkg = Package(eid, pkg_dict, self)
+                log.debug('Deleting unsynced {}'.format(pkg))
+                pkg._delete()
 
     @context_manager_method
     class sync_package(EntitySyncManager):
+
         def _prepare_entity(self):
             try:
                 pkg_dict = self._outer.find_package(self._eid)
             except NotFound:
                 pkg_dict = self._create_pkg()
-                pkg = Package(self._eid, pkg_dict, self._outer._api)
+                pkg = Package(self._eid, pkg_dict, self._outer)
                 log.debug('Created {}'.format(pkg))
             else:
-                pkg = Package(self._eid, pkg_dict, self._outer._api)
+                pkg = Package(self._eid, pkg_dict, self._outer)
                 log.debug('Using {}'.format(pkg))
-            self._outer._synced_ids.add(pkg['id'])
             return pkg
 
         def _create_pkg(self):
@@ -269,15 +276,12 @@ class Package(Entity):
     Not to be instantiated directly. Use ``Importer.sync_package``
     instead.
     '''
-    def __init__(self, eid, pkg_dict, api):
-        super(Package, self).__init__(eid, pkg_dict)
-        self._api = api
+    def __init__(self, eid, pkg_dict, imp):
+        super(Package, self).__init__(eid, pkg_dict, parent=imp)
+        self._api = imp._api
         self.extras = ExtrasDictView(pkg_dict['extras'])
 
     def _upload(self):
-        '''
-        Upload package dict to CKAN.
-        '''
         replace_dict(self,
                      self._api.action.package_update(**self))
 
@@ -286,6 +290,17 @@ class Package(Entity):
         Purge this package.
         '''
         self._api.action.dataset_purge(id=self['id'])
+
+    def delete_unsynced_resources(self):
+        '''
+        Delete resources that have not been synced.
+        '''
+        for res_dict in list(self['resources']):
+            eid = res_dict['ckanext_importer_resource_eid']
+            if eid not in self._synced_child_eids:
+                res = Resource(eid, res_dict, self)
+                log.debug('Deleting unsynced {}'.format(res))
+                res._delete()
 
     @context_manager_method
     class sync_resource(EntitySyncManager):
@@ -310,18 +325,19 @@ class Package(Entity):
 
         def __enter__(self):
             self._pkg_is_modified = self._outer._is_modified()
-            # FIXME: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
+            # Note: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
             return EntitySyncManager.__enter__(self)
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            # FIXME: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
-            EntitySyncManager.__exit__(self, exc_type, exc_val, exc_tb)
+            # Note: This call should use super(), but see https://stackoverflow.com/q/51860397/857390
+            result = EntitySyncManager.__exit__(self, exc_type, exc_val, exc_tb)
             if not self._pkg_is_modified:
                 # If the package was previously unmodified we mark it
                 # as unmodified again, since changes in the resource
                 # have already been uploaded (but their propagation to
                 # the package dict has marked the package as modified).
                 self._outer._mark_as_unmodified()
+            return result
 
 class Resource(Entity):
     '''
@@ -329,25 +345,23 @@ class Resource(Entity):
 
     Do not instantiate directly, use ``Package.sync_resource`` instead.
     '''
-    def __init__(self, eid, res_dict, pkg):
-        super(Resource, self).__init__(eid, res_dict)
-        self._pkg = pkg
-
     def _delete(self):
         id = self['id']
-        self._pkg._api.action.resource_delete(id=id)
-        self._pkg['resources'][:] = [r for r in self._pkg['resources']
-                                     if r['id'] != id]
+        self._parent._api.action.resource_delete(id=id)
+        self._parent['resources'][:] = [r for r in self._parent['resources']
+                                        if r['id'] != id]
 
     def _upload(self):
         '''
         Upload the modified resource dict and propagate the changes.
         '''
-        replace_dict(self, self._pkg._api.action.resource_update(**self))
+        replace_dict(self, self._parent._api.action.resource_update(**self))
 
     def _get_views_map(self):
         '''
         Get the map of views for this resource.
+
+        The views map maps view EIDs to view IDs.
         '''
         return json.loads(self.get('ckanext_importer_views', '{}'))
 
@@ -356,6 +370,16 @@ class Resource(Entity):
         Set the map of views for this resource.
         '''
         self['ckanext_importer_views'] = json.dumps(views, separators=(',', ':'))
+
+    def delete_unsynced_views(self):
+        '''
+        Delete views that have not been synced.
+        '''
+        for eid, id in list(self._get_views_map().items()):
+            if eid not in self._synced_child_eids:
+                view = View(eid, {'id': id}, self)
+                log.debug('Deleting unsynced {}'.format(view))
+                view._delete()
 
     @context_manager_method
     class sync_view(EntitySyncManager):
@@ -373,7 +397,7 @@ class Resource(Entity):
                 log.debug('Delaying view creation for EID {}'.format(self._eid))
                 return View(self._eid, {}, self._outer)
             else:
-                view_dict = self._outer._pkg._api.action.resource_view_show(id=id)
+                view_dict = self._outer._parent._api.action.resource_view_show(id=id)
                 view = View(self._eid, view_dict, self._outer)
                 log.debug('Using {}'.format(view))
                 return view
@@ -387,17 +411,13 @@ class View(Entity):
     '''
 
     # FIXME: When we update the resource's ckanext_importer_views field
-    #         then the upstream res dict is only updated once the
-    #         sync_resource CM exits. If this doesn't happen (due
-    #         to an exception or a call to dont_sync) then we end
-    #         up with an already created/deleted view that isn't
-    #         properly tracked by ckanext.importer. At the very least we
-    #         should automatically discover such issues, better would be
-    #         to prevent them in the first place.
-
-    def __init__(self, eid, view_dict, res):
-        super(View, self).__init__(eid, view_dict)
-        self._res = res
+    #        then the upstream res dict is only updated once the
+    #        sync_resource CM exits. If this doesn't happen (due
+    #        to an exception or a call to dont_sync) then we end
+    #        up with an already created/deleted view that isn't
+    #        properly tracked by ckanext.importer. At the very least we
+    #        should automatically discover such issues, better would be
+    #        to prevent them in the first place.
 
     def _upload(self):
         try:
@@ -406,19 +426,19 @@ class View(Entity):
             self._create()
         else:
             replace_dict(self,
-                         self._res._pkg._api.action.resource_view_update(**self))
+                         self._parent._parent._api.action.resource_view_update(**self))
 
     def _create(self):
         '''
         Create a view.
         '''
-        self['resource_id'] = self._res['id']
+        self['resource_id'] = self._parent['id']
         replace_dict(self,
-                     self._res._pkg._api.action.resource_view_create(**self))
+                     self._parent._parent._api.action.resource_view_create(**self))
         # Register the view in the resource
-        views = self._res._get_views_map()
+        views = self._parent._get_views_map()
         views[self._eid] = self['id']
-        self._res._set_views_map(views)
+        self._parent._set_views_map(views)
 
     def _delete(self):
         try:
@@ -426,11 +446,11 @@ class View(Entity):
         except KeyError:
             # View has not been created yet
             return
-        self._res._pkg._api.action.resource_view_delete(id=id)
+        self._parent._parent._api.action.resource_view_delete(id=id)
         # Unregister the view in the resource
-        views = self._res._get_views_map()
+        views = self._parent._get_views_map()
         del views[self._eid]
-        self._res._set_views_map(views)
+        self._parent._set_views_map(views)
 
 
 class ExtrasDictView(collections.MutableMapping):
