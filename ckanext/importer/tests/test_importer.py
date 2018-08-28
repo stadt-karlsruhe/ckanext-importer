@@ -28,6 +28,7 @@ import mock
 
 import ckanapi
 import ckan.logic
+from ckan.tests.factories import Organization
 
 from ckanext.importer import Entity, ExtrasDictView, Importer
 
@@ -266,6 +267,25 @@ class TestImporter(object):
             prefix = 'Importer {!r}: '.format(imp.id)
             for call_args in handle.call_args_list:
                 assert call_args[0][0].msg.startswith(prefix)
+
+    def test_default_owner_org_given(self, api, imp_factory):
+        '''
+        Test speciyfing the ``default_owner_org`` option.
+        '''
+        org_id = Organization()['id']
+        imp = imp_factory(default_owner_org=org_id)
+        with imp.sync_package('x') as pkg:
+            assert pkg['owner_org'] == org_id
+            assert api.action.package_show(id=pkg['id'])['owner_org'] == org_id
+
+    def test_default_owner_org_not_given(self, api, imp_factory):
+        '''
+        Test not speciyfing the ``default_owner_org`` option.
+        '''
+        imp = imp_factory()
+        with imp.sync_package('x') as pkg:
+            assert pkg['owner_org'] == ''
+            assert api.action.package_show(id=pkg['id'])['owner_org'] == ''
 
 
 class TestPackage(object):
