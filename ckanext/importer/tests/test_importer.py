@@ -47,9 +47,7 @@ class TestImporter(object):
             # Check that the package already exists
             id = pkg['id']
             api.action.package_show(id=id)
-
             pkg['title'] = title
-
         # Check that the changes have been synced
         assert api.action.package_show(id=id)['title'] == title
 
@@ -253,27 +251,27 @@ class TestImporter(object):
         with pytest.raises(RuntimeError):
             imp.find_package('a')
 
-    def test_logging_prefix(self, imp):
+    def test_logging_prefix(self, imp, caplog):
         '''
         Test that log messages are prefixed with the importer ID.
         '''
-        with mock.patch('ckanext.importer.logging.Logger.handle') as handle:
-            imp._log.debug('x')
-            imp._log.info('x')
-            imp._log.warning('x')
-            imp._log.error('x')
-            imp._log.critical('x')
-            try:
-                raise ValueError('oops')
-            except ValueError:
-                imp._log.exception('x')
-            for level in (logging.DEBUG, logging.INFO, logging.WARNING,
-                          logging.ERROR, logging.CRITICAL):
-                imp._log.log(level, 'x')
-            assert handle.call_count == 11
-            prefix = 'Importer {!r}: '.format(imp.id)
-            for call_args in handle.call_args_list:
-                assert call_args[0][0].msg.startswith(prefix)
+        caplog.set_level(logging.DEBUG)
+        imp._log.debug('x')
+        imp._log.info('x')
+        imp._log.warning('x')
+        imp._log.error('x')
+        imp._log.critical('x')
+        try:
+            raise ValueError('oops')
+        except ValueError:
+            imp._log.exception('x')
+        for level in (logging.DEBUG, logging.INFO, logging.WARNING,
+                      logging.ERROR, logging.CRITICAL):
+            imp._log.log(level, 'x')
+        assert len(caplog.records) == 11
+        prefix = 'Importer {!r}: '.format(imp.id)
+        for record in caplog.records:
+            assert record.message.startswith(prefix)
 
     def test_default_owner_org_given(self, api, imp_factory):
         '''
@@ -294,38 +292,47 @@ class TestImporter(object):
             assert not pkg['owner_org']
             assert not api.action.package_show(id=pkg['id'])['owner_org']
 
-    def test_exception_during_package_creation_reraise(self, api, imp):
+    def test_exception_during_package_creation_reraise(self, api, imp, caplog):
         '''
         Test error handling during package creation with on_error=reraise.
         '''
         with pytest.raises(ValueError):
             with imp.sync_package('x', on_error=OnError.reraise) as pkg:
                 id = pkg['id']
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckan.logic.NotFound):
             api.action.package_show(id=id)
 
-    def test_exception_during_package_creation_keep(self, api, imp):
+    def test_exception_during_package_creation_keep(self, api, imp, caplog):
         '''
         Test error handling during package creation with on_error=keep.
         '''
         with imp.sync_package('x', on_error=OnError.keep) as pkg:
             id = pkg['id']
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckan.logic.NotFound):
             api.action.package_show(id=id)
 
-    def test_exception_during_package_creation_delete(self, api, imp):
+    def test_exception_during_package_creation_delete(self, api, imp, caplog):
         '''
         Test error handling during package creation with on_error=delete.
         '''
         with imp.sync_package('x', on_error=OnError.delete) as pkg:
             id = pkg['id']
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckan.logic.NotFound):
             api.action.package_show(id=id)
 
-    def test_exception_during_package_update_reraise(self, api, imp):
+    def test_exception_during_package_update_reraise(self, api, imp, caplog):
         '''
         Test error handling during package update with on_error=reraise.
         '''
@@ -336,10 +343,13 @@ class TestImporter(object):
         with pytest.raises(ValueError):
             with imp.sync_package(eid, on_error=OnError.reraise) as pkg:
                 pkg['title'] = 'A new title'
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.package_show(id=id)['title'] == old_title
 
-    def test_exception_during_package_update_keep(self, api, imp):
+    def test_exception_during_package_update_keep(self, api, imp, caplog):
         '''
         Test error handling during package update with on_error=keep.
         '''
@@ -349,10 +359,13 @@ class TestImporter(object):
             old_title = pkg['title']
         with imp.sync_package(eid, on_error=OnError.keep) as pkg:
             pkg['title'] = 'A new title'
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.package_show(id=id)['title'] == old_title
 
-    def test_exception_during_package_update_delete(self, api, imp):
+    def test_exception_during_package_update_delete(self, api, imp, caplog):
         '''
         Test error handling during package update with on_error=delete.
         '''
@@ -360,7 +373,10 @@ class TestImporter(object):
         with imp.sync_package(eid) as pkg:
             id = pkg['id']
         with imp.sync_package(eid, on_error=OnError.delete) as pkg:
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckan.logic.NotFound):
             api.action.package_show(id=id)
 
@@ -393,10 +409,8 @@ class TestPackage(object):
             # Check that the resource already exists
             id = res['id']
             res_dict = api.action.resource_show(id=id)
-
             # Check that the cached package dict has been updated
             assert pkg['resources'][0] == res_dict
-
             res['name'] = name
 
         # Check that the changes have been uploaded
@@ -432,7 +446,6 @@ class TestPackage(object):
                 id = res['id']
             # Check that the changes have been uploaded
             assert api.action.resource_show(id=id)['name'] == name
-
             # Check that the cached package dict has been updated
             assert pkg['resources'][0]['name'] == name
 
@@ -446,7 +459,6 @@ class TestPackage(object):
             res['upload'] = fake_file
         url = api.action.resource_show(id=res['id'])['url']
         assert url.endswith(fake_file.name)
-
         # Check that the `upload` key has not been stored in the cached
         # package dict
         assert 'upload' not in pkg['resources'][0]
@@ -464,7 +476,6 @@ class TestPackage(object):
             res['upload'] = fake_file
         url = api.action.resource_show(id=res['id'])['url']
         assert url.endswith(fake_file.name)
-
         # Check that the `upload` key has not been stored in the cached
         # package dict
         assert 'upload' not in pkg['resources'][0]
@@ -653,38 +664,47 @@ class TestPackage(object):
         for res_eid in '1', '3', '5', '7':
             api.action.resource_show(id=res_ids[res_eid])
 
-    def test_exception_during_resource_creation_reraise(self, api, pkg):
+    def test_exception_during_resource_creation_reraise(self, api, pkg, caplog):
         '''
         Test error handling during resource creation with on_error=reraise.
         '''
         with pytest.raises(ValueError):
             with pkg.sync_resource('x', on_error=OnError.reraise) as res:
                 id = res['id']
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckanapi.NotFound):
             api.action.resource_show(id=id)
 
-    def test_exception_during_resource_creation_keep(self, api, pkg):
+    def test_exception_during_resource_creation_keep(self, api, pkg, caplog):
         '''
         Test error handling during resource creation with on_error=keep.
         '''
         with pkg.sync_resource('x', on_error=OnError.keep) as res:
             id = res['id']
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckanapi.NotFound):
             api.action.resource_show(id=id)
 
-    def test_exception_during_resource_creation_delete(self, api, pkg):
+    def test_exception_during_resource_creation_delete(self, api, pkg, caplog):
         '''
         Test error handling during resource creation with on_error=delete.
         '''
         with pkg.sync_resource('x', on_error=OnError.delete) as res:
             id = res['id']
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckanapi.NotFound):
             api.action.resource_show(id=id)
 
-    def test_exception_during_resource_update_reraise(self, api, pkg):
+    def test_exception_during_resource_update_reraise(self, api, pkg, caplog):
         '''
         Test error handling during resource update with on_error=reraise.
         '''
@@ -695,10 +715,13 @@ class TestPackage(object):
         with pytest.raises(ValueError):
             with pkg.sync_resource(eid, on_error=OnError.reraise) as res:
                 res['name'] = 'A new name'
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.resource_show(id=id)['name'] == old_name
 
-    def test_exception_during_resource_update_keep(self, api, pkg):
+    def test_exception_during_resource_update_keep(self, api, pkg, caplog):
         '''
         Test error handling during resource update with on_error=keep.
         '''
@@ -708,10 +731,13 @@ class TestPackage(object):
             old_name = res['name']
         with pkg.sync_resource(eid, on_error=OnError.keep) as res:
             res['name'] = 'A new name'
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.resource_show(id=id)['name'] == old_name
 
-    def test_exception_during_resource_update_delete(self, api, pkg):
+    def test_exception_during_resource_update_delete(self, api, pkg, caplog):
         '''
         Test error handling during resource update with on_error=delete.
         '''
@@ -719,7 +745,10 @@ class TestPackage(object):
         with pkg.sync_resource(eid) as res:
             id = res['id']
         with pkg.sync_resource(eid, on_error=OnError.delete) as res:
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         with pytest.raises(ckanapi.NotFound):
             api.action.resource_show(id=id)
 
@@ -859,32 +888,41 @@ class TestResource(object):
         for view_eid in '1', '3', '5', '7':
             api.action.resource_view_show(id=view_ids[view_eid])
 
-    def test_exception_during_view_creation_reraise(self, api, res):
+    def test_exception_during_view_creation_reraise(self, api, res, caplog):
         '''
         Test error handling during view creation with on_error=reraise.
         '''
         with pytest.raises(ValueError):
             with res.sync_view('x', on_error=OnError.reraise):
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert not api.action.resource_view_list(id=res['id'])
 
-    def test_exception_during_view_creation_keep(self, api, res):
+    def test_exception_during_view_creation_keep(self, api, res, caplog):
         '''
         Test error handling during view creation with on_error=keep.
         '''
         with res.sync_view('x', on_error=OnError.keep):
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert not api.action.resource_view_list(id=res['id'])
 
-    def test_exception_during_view_creation_delete(self, api, res):
+    def test_exception_during_view_creation_delete(self, api, res, caplog):
         '''
         Test error handling during view creation with on_error=delete.
         '''
         with res.sync_view('x', on_error=OnError.delete):
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert not api.action.resource_view_list(id=res['id'])
 
-    def test_exception_during_view_update_reraise(self, api, res):
+    def test_exception_during_view_update_reraise(self, api, res, caplog):
         '''
         Test error handling during view update with on_error=reraise.
         '''
@@ -896,10 +934,13 @@ class TestResource(object):
         with pytest.raises(ValueError):
             with res.sync_view(eid, on_error=OnError.reraise):
                 view['title'] = 'A new title'
+                caplog.clear()
                 raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.resource_view_show(id=id)['title'] == 'title'
 
-    def test_exception_during_view_update_keep(self, api, res):
+    def test_exception_during_view_update_keep(self, api, res, caplog):
         '''
         Test error handling during view update with on_error=keep.
         '''
@@ -910,10 +951,13 @@ class TestResource(object):
         id = view['id']
         with res.sync_view(eid, on_error=OnError.keep):
             view['title'] = 'A new title'
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert api.action.resource_view_show(id=id)['title'] == 'title'
 
-    def test_exception_during_view_update_delete(self, api, res):
+    def test_exception_during_view_update_delete(self, api, res, caplog):
         '''
         Test error handling during view update with on_error=delete.
         '''
@@ -922,7 +966,10 @@ class TestResource(object):
             view['view_type'] = 'text_view'
             view['title'] = 'title'
         with res.sync_view(eid, on_error=OnError.delete):
+            caplog.clear()
             raise ValueError('Oops')
+        assert caplog.records[0].levelno == logging.ERROR
+        assert 'Oops' in caplog.records[0].message
         assert not api.action.resource_view_list(id=res['id'])
 
 

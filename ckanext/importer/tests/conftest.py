@@ -20,15 +20,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import errno
-import io
-import json
 import logging
 import os.path
 
 import paste.deploy
 from paste.registry import Registry
-from pylons import config, translator
+from pylons import translator
 import pytest
 
 from ckan.config.environment import load_environment
@@ -53,7 +50,6 @@ def _load_ckan_environment(ini_path):
     Load CKAN environment.
     '''
     ini_path = os.path.abspath(ini_path)
-    logging.config.fileConfig(ini_path, disable_existing_loggers=False)
     conf = paste.deploy.appconfig('config:' + ini_path)
     load_environment(conf.global_conf, conf.local_conf)
     _register_translator()

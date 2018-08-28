@@ -206,27 +206,24 @@ _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
 
-    class _PrefixLogger(logging.Logger):
+    class _PrefixLoggerAdapter(logging.LoggerAdapter):
         '''
-        A logger that adds a prefix to each message.
+        A LoggerAdapter that adds a prefix to each message.
         '''
-        def __init__(self, name, prefix, *args, **kwargs):
-            super(Importer._PrefixLogger, self).__init__(name, *args, **kwargs)
-            self._prefix = prefix
+        def __init__(self, logger, prefix):
+            super(Importer._PrefixLoggerAdapter, self).__init__(
+                logger, {'prefix': prefix})
 
-        def makeRecord(self, name, level, fn, lno, msg, args, exc_info,
-                       func=None, extra=None):
-            return super(Importer._PrefixLogger, self).makeRecord(
-                name, level, fn, lno, self._prefix + msg, args, exc_info, func,
-                extra
-            )
+        def process(self, msg, kwargs):
+            return self.extra['prefix'] + msg, kwargs
 
     def __init__(self, id, api=None, default_owner_org=None):
         self.id = unicode(id)
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
         self._synced_child_eids = set()
-        self._log = Importer._PrefixLogger(__name__, 'Importer {!r}: '.format(self.id))
+        self._log = Importer._PrefixLoggerAdapter(
+            logging.getLogger(__name__), 'Importer {!r}: '.format(self.id))
 
     def delete_unsynced_packages(self):
         '''
