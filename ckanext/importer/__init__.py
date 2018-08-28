@@ -113,26 +113,62 @@ class Entity(DictWrapper):
                                         id_part, self._eid)
 
 
+class OnError(Enum):
+    '''
+    Error handling constants.
+    '''
+    #: Reraise the exception
+    reraise = 1
+
+    #: Swallow the exception and keep the old version of the entity
+    keep = 2
+
+    #: Swallow the exception and delete the entity
+    delete = 3
+
+
 class EntitySyncManager(object):
     '''
     Context manager for synchronizing an ``Entity``.
 
     Do not instantiate directly.
     '''
-    def __init__(self, eid):
+    def __init__(self, eid, on_error=OnError.keep):
         self._eid = unicode(eid)
+        if not isinstance(on_error, OnError):
+            raise TypeError('on_error must be of type OnError')
+        self._on_error = on_error
 
-    def _prepare_entity(self):
+    def _find_entity(self):
         '''
-        Find, create, or otherwise prepare the entity.
+        Find an existing entity.
 
-        Subclasses must implement this method to return an entity based
-        on ``_eid``.
+        Subclasses must implement this method to return an existing
+        entity based on ``_eid``.
+
+        If no entity with that EID exists then ``ckan.logic.NotFound``
+        must be raised.
         '''
         raise NotImplementedError()
 
+    def _create_entity(self):
+        '''
+        Create a new entity.
+
+        Subclasses must implement this method to create and return a
+        new entity based on ``_eid``.
+        '''
+        raise NotImplementedError
+
     def __enter__(self):
-        self._entity = self._prepare_entity()
+        try:
+            self._entity = self._find_entity()
+            self._just_created = False
+            self._outer._log.debug('Using {}'.format(self._entity))
+        except NotFound:
+            self._entity = self._create_entity()
+            self._just_created = True
+            self._outer._log.debug('Created {}'.format(self._entity))
         assert self._entity is not None
         self._entity._mark_as_synced()
         return self._entity
@@ -140,12 +176,24 @@ class EntitySyncManager(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         entity = self._entity
         if exc_type is not None:
-            entity._log.error('An error occured during the synchronization of {}: {}'.format(entity, exc_val),
-                              exc_info=(exc_type, exc_val, exc_tb))
-            entity._log.error('Changes to {} will not be uploaded'.format(entity))
-            return True  # Swallow exception
+            if self._just_created:
+                # If the entity was created at the beginning of the context
+                # manager then it is deleted regardless of the on_error
+                # setting
+                entity._log.error('Newly created {} will not be kept due to an error: {}'.format(entity, exc_val),
+                                  exc_info=(exc_type, exc_val, exc_tb))
+                entity._delete()
+            elif self._on_error == OnError.delete:
+                entity._log.error('Deleting existing {} due to an error: {}'.format(entity, exc_val),
+                                  exc_info=(exc_type, exc_val, exc_tb))
+                entity._delete()
+            else:
+                # OnError.keep and OnError.reraise
+                entity._log.error('Changes to {} will not be uploaded due to an error: {}'.format(entity, exc_val),
+                                  exc_info=(exc_type, exc_val, exc_tb))
+            return self._on_error != OnError.reraise  # Swallow/reraise
         if entity._to_be_deleted:
-            entity._log.debug('{} is marked for deletion, removing it'.format(entity))
+            entity._log.debug('Deleting {}'.format(entity))
             entity._delete()
         elif entity._is_modified():
             entity._log.debug('Uploading {}'.format(entity))
@@ -195,30 +243,16 @@ class Importer(object):
     @context_manager_method
     class sync_package(EntitySyncManager):
 
-        def _prepare_entity(self):
-            try:
-                pkg_dict = self._outer.find_package(self._eid)
-            except NotFound:
-                pkg_dict = self._create_pkg()
-                pkg = Package(self._eid, pkg_dict, self._outer)
-                self._outer._log.debug('Created {}'.format(pkg))
-            else:
-                pkg = Package(self._eid, pkg_dict, self._outer)
-                self._outer._log.debug('Using {}'.format(pkg))
-            return pkg
+        def _find_entity(self):
+            pkg_dict = self._outer.find_package(self._eid)
+            return Package(self._eid, pkg_dict, self._outer)
 
-        def _create_pkg(self):
-            '''
-            Create a new CKAN package.
-
-            Takes care of finding an unused name and of setting the
-            required ckanext.importer metadata.
-            '''
+        def _create_entity(self):
             i = 0
             while True:
                 name = '{}{}'.format(_PACKAGE_NAME_PREFIX, i)
                 try:
-                    return self._outer._api.action.package_create(
+                    pkg_dict = self._outer._api.action.package_create(
                         name=name,
                         owner_org=self._outer.default_owner_org,
                         extras=[
@@ -234,6 +268,7 @@ class Importer(object):
                         i += 1
                         continue
                     raise
+                return Package(self._eid, pkg_dict, self._outer)
 
     def find_packages(self, eid=None):
         '''
@@ -324,24 +359,23 @@ class Package(Entity):
 
     @context_manager_method
     class sync_resource(EntitySyncManager):
-        def _prepare_entity(self):
+
+        def _find_entity(self):
             res_dicts = [r for r in self._outer['resources']
                          if r['ckanext_importer_resource_eid'] == self._eid]
             if not res_dicts:
-                res_dict = self._outer._api.action.resource_create(
-                    package_id=self._outer['id'],
-                    ckanext_importer_resource_eid=self._eid,
-                )
-                self._outer['resources'].append(res_dict)
-                res = Resource(self._eid, res_dict, self._outer)
-                self._outer._log.info('Created {}'.format(res))
-                return res
-            elif len(res_dicts) > 1:
+                raise NotFound('No resource with EID {!r} in {}'.format(self._eid, self._outer))
+            if len(res_dicts) > 1:
                 raise ValueError('Multiple resources for EID {} in {}'.format(self._eid, self._outer))
-            else:
-                res = Resource(self._eid, res_dicts[0], self._outer)
-                self._outer._log.debug('Using {}'.format(res))
-                return res
+            return Resource(self._eid, res_dicts[0], self._outer)
+
+        def _create_entity(self):
+            res_dict = self._outer._api.action.resource_create(
+                package_id=self._outer['id'],
+                ckanext_importer_resource_eid=self._eid,
+            )
+            self._outer['resources'].append(res_dict)
+            return Resource(self._eid, res_dict, self._outer)
 
         def __enter__(self):
             self._pkg_is_modified = self._outer._is_modified()
@@ -403,24 +437,18 @@ class Resource(Entity):
 
     @context_manager_method
     class sync_view(EntitySyncManager):
-        def _prepare_entity(self):
+
+        def _find_entity(self):
             views = self._outer._get_views_map()
             try:
                 id = views[self._eid]
             except KeyError:
-               # Ideally, we'd like to create a new view here (like we do for
-                # packages and resources). However, CKAN's resource_view_create
-                # requires us to fix the view's type, and resource_view_update
-                # doesn't allow us to alter it afterwards. Hence we return an
-                # empty dict here and do the creation when entering the context
-                # manager.
-                self._outer._log.debug('Delaying view creation for EID {}'.format(self._eid))
-                return View(self._eid, {}, self._outer)
-            else:
-                view_dict = self._outer._api.action.resource_view_show(id=id)
-                view = View(self._eid, view_dict, self._outer)
-                self._outer._log.debug('Using {}'.format(view))
-                return view
+                raise NotFound('No view with EID {!r} in {}'.format(self._eid, self._outer))
+            view_dict = self._outer._api.action.resource_view_show(id=id)
+            return View(self._eid, view_dict, self._outer)
+
+        def _create_entity(self):
+            return View(self._eid, {}, self._outer)
 
 
 class View(Entity):

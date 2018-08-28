@@ -30,7 +30,7 @@ import ckanapi
 import ckan.logic
 from ckan.tests.factories import Organization
 
-from ckanext.importer import Entity, ExtrasDictView, Importer
+from ckanext.importer import Entity, ExtrasDictView, Importer, OnError
 
 
 # See conftest.py for the definition of the pytest fixtures
@@ -189,7 +189,7 @@ class TestImporter(object):
         Test deletion of unsynced packages.
         '''
         importer_id = 'importer-id'
-        eids = [unicode(i) for i in range(9)]
+        eids = [unicode(i) for i in range(13)]
         ids = {}
         imp = imp_factory(importer_id)
         for eid in eids:
@@ -202,17 +202,24 @@ class TestImporter(object):
         with imp.sync_package(eids[3]) as pkg:
             # Sync without any changes
             pass
-        with imp.sync_package(eids[5]) as pkg:
-            # Error
+        with pytest.raises(ValueError):
+            with imp.sync_package(eids[5], on_error=OnError.reraise) as pkg:
+                # Reraised error
+                raise ValueError('Oops')
+        with imp.sync_package(eids[7], on_error=OnError.keep) as pkg:
+            # Swallowed error
             raise ValueError('Oops')
-        with imp.sync_package(eids[7]) as pkg:
+        with imp.sync_package(eids[9], on_error=OnError.delete) as pkg:
+            # Swallowed error with entity deletion
+            raise ValueError('Oops')
+        with imp.sync_package(eids[11]) as pkg:
             # Delete
             pkg.delete()
         imp.delete_unsynced_packages()
-        for eid in '02468':
+        for eid in '0', '2', '4', '6', '8', '9', '10', '11', '12':
             with pytest.raises(ckanapi.NotFound):
                 api.action.package_show(id=ids[eid])
-        for eid in '135':
+        for eid in '1', '3', '5', '7':
             api.action.package_show(id=ids[eid])
 
     def test_find_packages(self, api, imp):
@@ -284,8 +291,78 @@ class TestImporter(object):
         '''
         imp = imp_factory()
         with imp.sync_package('x') as pkg:
-            assert pkg['owner_org'] == ''
-            assert api.action.package_show(id=pkg['id'])['owner_org'] == ''
+            assert not pkg['owner_org']
+            assert not api.action.package_show(id=pkg['id'])['owner_org']
+
+    def test_exception_during_package_creation_reraise(self, api, imp):
+        '''
+        Test error handling during package creation with on_error=reraise.
+        '''
+        with pytest.raises(ValueError):
+            with imp.sync_package('x', on_error=OnError.reraise) as pkg:
+                id = pkg['id']
+                raise ValueError('Oops')
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.package_show(id=id)
+
+    def test_exception_during_package_creation_keep(self, api, imp):
+        '''
+        Test error handling during package creation with on_error=keep.
+        '''
+        with imp.sync_package('x', on_error=OnError.keep) as pkg:
+            id = pkg['id']
+            raise ValueError('Oops')
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.package_show(id=id)
+
+    def test_exception_during_package_creation_delete(self, api, imp):
+        '''
+        Test error handling during package creation with on_error=delete.
+        '''
+        with imp.sync_package('x', on_error=OnError.delete) as pkg:
+            id = pkg['id']
+            raise ValueError('Oops')
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.package_show(id=id)
+
+    def test_exception_during_package_update_reraise(self, api, imp):
+        '''
+        Test error handling during package update with on_error=reraise.
+        '''
+        eid = 'x'
+        with imp.sync_package(eid) as pkg:
+            id = pkg['id']
+            old_title = pkg['title']
+        with pytest.raises(ValueError):
+            with imp.sync_package(eid, on_error=OnError.reraise) as pkg:
+                pkg['title'] = 'A new title'
+                raise ValueError('Oops')
+        assert api.action.package_show(id=id)['title'] == old_title
+
+    def test_exception_during_package_update_keep(self, api, imp):
+        '''
+        Test error handling during package update with on_error=keep.
+        '''
+        eid = 'x'
+        with imp.sync_package(eid) as pkg:
+            id = pkg['id']
+            old_title = pkg['title']
+        with imp.sync_package(eid, on_error=OnError.keep) as pkg:
+            pkg['title'] = 'A new title'
+            raise ValueError('Oops')
+        assert api.action.package_show(id=id)['title'] == old_title
+
+    def test_exception_during_package_update_delete(self, api, imp):
+        '''
+        Test error handling during package update with on_error=delete.
+        '''
+        eid = 'x'
+        with imp.sync_package(eid) as pkg:
+            id = pkg['id']
+        with imp.sync_package(eid, on_error=OnError.delete) as pkg:
+            raise ValueError('Oops')
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.package_show(id=id)
 
 
 class TestPackage(object):
@@ -543,7 +620,7 @@ class TestPackage(object):
         Test deletion of unsynced resources.
         '''
         pkg_eid = 'x'
-        res_eids = [unicode(i) for i in range(9)]
+        res_eids = [unicode(i) for i in range(13)]
         res_ids = {}
         with imp.sync_package(pkg_eid) as pkg:
             for res_eid in res_eids:
@@ -556,18 +633,95 @@ class TestPackage(object):
             with pkg.sync_resource(res_eids[3]) as res:
                 # Sync without any changes
                 pass
-            with pkg.sync_resource(res_eids[5]) as res:
-                # Error
+            with pytest.raises(ValueError):
+                with pkg.sync_resource(res_eids[5], on_error=OnError.reraise) as res:
+                    # Reraised error
+                    raise ValueError('Oops')
+            with pkg.sync_resource(res_eids[7], on_error=OnError.keep) as res:
+                # Swallowed error
                 raise ValueError('Oops')
-            with pkg.sync_resource(res_eids[7]) as res:
+            with pkg.sync_resource(res_eids[9], on_error=OnError.delete) as res:
+                # Swallowed error with entity deletion
+                raise ValueError('Oops')
+            with pkg.sync_resource(res_eids[11]) as res:
                 # Delete
                 res.delete()
             pkg.delete_unsynced_resources()
-        for res_eid in '02468':
+        for res_eid in '0', '2', '4', '6', '8', '9', '10', '11', '12':
             with pytest.raises(ckanapi.NotFound):
                 api.action.resource_show(id=res_ids[res_eid])
-        for res_eid in '135':
+        for res_eid in '1', '3', '5', '7':
             api.action.resource_show(id=res_ids[res_eid])
+
+    def test_exception_during_resource_creation_reraise(self, api, pkg):
+        '''
+        Test error handling during resource creation with on_error=reraise.
+        '''
+        with pytest.raises(ValueError):
+            with pkg.sync_resource('x', on_error=OnError.reraise) as res:
+                id = res['id']
+                raise ValueError('Oops')
+        with pytest.raises(ckanapi.NotFound):
+            api.action.resource_show(id=id)
+
+    def test_exception_during_resource_creation_keep(self, api, pkg):
+        '''
+        Test error handling during resource creation with on_error=keep.
+        '''
+        with pkg.sync_resource('x', on_error=OnError.keep) as res:
+            id = res['id']
+            raise ValueError('Oops')
+        with pytest.raises(ckanapi.NotFound):
+            api.action.resource_show(id=id)
+
+    def test_exception_during_resource_creation_delete(self, api, pkg):
+        '''
+        Test error handling during resource creation with on_error=delete.
+        '''
+        with pkg.sync_resource('x', on_error=OnError.delete) as res:
+            id = res['id']
+            raise ValueError('Oops')
+        with pytest.raises(ckanapi.NotFound):
+            api.action.resource_show(id=id)
+
+    def test_exception_during_resource_update_reraise(self, api, pkg):
+        '''
+        Test error handling during resource update with on_error=reraise.
+        '''
+        eid = 'x'
+        with pkg.sync_resource(eid) as res:
+            id = res['id']
+            old_name = res['name']
+        with pytest.raises(ValueError):
+            with pkg.sync_resource(eid, on_error=OnError.reraise) as res:
+                res['name'] = 'A new name'
+                raise ValueError('Oops')
+        assert api.action.resource_show(id=id)['name'] == old_name
+
+    def test_exception_during_resource_update_keep(self, api, pkg):
+        '''
+        Test error handling during resource update with on_error=keep.
+        '''
+        eid = 'x'
+        with pkg.sync_resource(eid) as res:
+            id = res['id']
+            old_name = res['name']
+        with pkg.sync_resource(eid, on_error=OnError.keep) as res:
+            res['name'] = 'A new name'
+            raise ValueError('Oops')
+        assert api.action.resource_show(id=id)['name'] == old_name
+
+    def test_exception_during_resource_update_delete(self, api, pkg):
+        '''
+        Test error handling during resource update with on_error=delete.
+        '''
+        eid = 'x'
+        with pkg.sync_resource(eid) as res:
+            id = res['id']
+        with pkg.sync_resource(eid, on_error=OnError.delete) as res:
+            raise ValueError('Oops')
+        with pytest.raises(ckanapi.NotFound):
+            api.action.resource_show(id=id)
 
 
 class TestResource(object):
@@ -670,7 +824,7 @@ class TestResource(object):
         Test deletion of unsynced views.
         '''
         res_eid = 'x'
-        view_eids = [unicode(i) for i in range(9)]
+        view_eids = [unicode(i) for i in range(13)]
         view_ids = {}
         with pkg.sync_resource(res_eid) as res:
             for view_eid in view_eids:
@@ -685,18 +839,91 @@ class TestResource(object):
             with res.sync_view(view_eids[3]) as view:
                 # Sync without any changes
                 pass
-            with res.sync_view(view_eids[5]) as view:
-                # Error
+            with pytest.raises(ValueError):
+                with res.sync_view(view_eids[5], on_error=OnError.reraise) as view:
+                    # Reraised error
+                    raise ValueError('Oops')
+            with res.sync_view(view_eids[7], on_error=OnError.keep) as view:
+                # Swallowed error
                 raise ValueError('Oops')
-            with res.sync_view(view_eids[7]) as view:
+            with res.sync_view(view_eids[9], on_error=OnError.delete) as view:
+                # Swallowed error with entity deletion
+                raise ValueError('Oops')
+            with res.sync_view(view_eids[11]) as view:
                 # Delete
                 view.delete()
             res.delete_unsynced_views()
-        for view_eid in '02468':
+        for view_eid in '0', '2', '4', '6', '8', '9', '10', '11', '12':
             with pytest.raises(ckanapi.NotFound):
                 api.action.resource_view_show(id=view_ids[view_eid])
-        for view_eid in '135':
+        for view_eid in '1', '3', '5', '7':
             api.action.resource_view_show(id=view_ids[view_eid])
+
+    def test_exception_during_view_creation_reraise(self, api, res):
+        '''
+        Test error handling during view creation with on_error=reraise.
+        '''
+        with pytest.raises(ValueError):
+            with res.sync_view('x', on_error=OnError.reraise):
+                raise ValueError('Oops')
+        assert not api.action.resource_view_list(id=res['id'])
+
+    def test_exception_during_view_creation_keep(self, api, res):
+        '''
+        Test error handling during view creation with on_error=keep.
+        '''
+        with res.sync_view('x', on_error=OnError.keep):
+            raise ValueError('Oops')
+        assert not api.action.resource_view_list(id=res['id'])
+
+    def test_exception_during_view_creation_delete(self, api, res):
+        '''
+        Test error handling during view creation with on_error=delete.
+        '''
+        with res.sync_view('x', on_error=OnError.delete):
+            raise ValueError('Oops')
+        assert not api.action.resource_view_list(id=res['id'])
+
+    def test_exception_during_view_update_reraise(self, api, res):
+        '''
+        Test error handling during view update with on_error=reraise.
+        '''
+        eid = 'x'
+        with res.sync_view(eid) as view:
+            view['view_type'] = 'text_view'
+            view['title'] = 'title'
+        id = view['id']
+        with pytest.raises(ValueError):
+            with res.sync_view(eid, on_error=OnError.reraise):
+                view['title'] = 'A new title'
+                raise ValueError('Oops')
+        assert api.action.resource_view_show(id=id)['title'] == 'title'
+
+    def test_exception_during_view_update_keep(self, api, res):
+        '''
+        Test error handling during view update with on_error=keep.
+        '''
+        eid = 'x'
+        with res.sync_view(eid) as view:
+            view['view_type'] = 'text_view'
+            view['title'] = 'title'
+        id = view['id']
+        with res.sync_view(eid, on_error=OnError.keep):
+            view['title'] = 'A new title'
+            raise ValueError('Oops')
+        assert api.action.resource_view_show(id=id)['title'] == 'title'
+
+    def test_exception_during_view_update_delete(self, api, res):
+        '''
+        Test error handling during view update with on_error=delete.
+        '''
+        eid = 'x'
+        with res.sync_view(eid) as view:
+            view['view_type'] = 'text_view'
+            view['title'] = 'title'
+        with res.sync_view(eid, on_error=OnError.delete):
+            raise ValueError('Oops')
+        assert not api.action.resource_view_list(id=res['id'])
 
 
 class TestView(object):
