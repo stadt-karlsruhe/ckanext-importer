@@ -229,7 +229,7 @@ class Importer(object):
         '''
         Delete packages that have not been synced.
         '''
-        for pkg_dict in self.find_packages():
+        for pkg_dict in self._find_packages():
             extras = ExtrasDictView(pkg_dict['extras'])
             eid = extras['ckanext_importer_package_eid']
             if eid not in self._synced_child_eids:
@@ -239,9 +239,8 @@ class Importer(object):
 
     @context_manager_method
     class sync_package(EntitySyncManager):
-
         def _find_entity(self):
-            pkg_dict = self._outer.find_package(self._eid)
+            pkg_dict = self._outer._find_package(self._eid)
             return Package(self._eid, pkg_dict, self._outer)
 
         def _create_entity(self):
@@ -267,7 +266,7 @@ class Importer(object):
                     raise
                 return Package(self._eid, pkg_dict, self._outer)
 
-    def find_packages(self, eid=None):
+    def _find_packages(self, eid=None):
         '''
         Find existing packages for this importer.
 
@@ -297,7 +296,7 @@ class Importer(object):
                 continue
             yield pkg_dict
 
-    def find_package(self, eid):
+    def _find_package(self, eid):
         '''
         Find an existing package for this importer.
 
@@ -311,7 +310,7 @@ class Importer(object):
         Raises ``RuntimeError`` if more than one package with the given
         EID are found. This only happens with a corrupted database.
         '''
-        pkg_dicts = list(islice(self.find_packages(eid), 2))
+        pkg_dicts = list(islice(self._find_packages(eid), 2))
         if not pkg_dicts:
             raise NotFound('No package with EID {!r} exists for {}'.format(eid, self))
         if len(pkg_dicts) > 1:

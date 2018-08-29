@@ -220,37 +220,6 @@ class TestImporter(object):
         for eid in '1', '3', '5', '7':
             api.action.package_show(id=ids[eid])
 
-    def test_find_packages(self, api, imp):
-        def extras(eid):
-            return [{'key': 'ckanext_importer_importer_id', 'value': imp.id},
-                    {'key': 'ckanext_importer_package_eid', 'value': eid}]
-        assert list(imp.find_packages()) == []
-        id1 = api.action.package_create(name='p1', extras=extras('a'))['id']
-        assert {p['id'] for p in imp.find_packages()} == {id1}
-        assert {p['id'] for p in imp.find_packages('a')} == {id1}
-        id2 = api.action.package_create(name='p2', extras=extras('b'))['id']
-        assert {p['id'] for p in imp.find_packages()} == {id1, id2}
-        assert {p['id'] for p in imp.find_packages('a')} == {id1}
-        assert {p['id'] for p in imp.find_packages('b')} == {id2}
-        id3 = api.action.package_create(name='p3', extras=extras('a'))['id']
-        assert {p['id'] for p in imp.find_packages()} == {id1, id2, id3}
-        assert {p['id'] for p in imp.find_packages('a')} == {id1, id3}
-        assert {p['id'] for p in imp.find_packages('b')} == {id2}
-
-    def test_find_package(self, api, imp):
-        def extras(eid):
-            return [{'key': 'ckanext_importer_importer_id', 'value': imp.id},
-                    {'key': 'ckanext_importer_package_eid', 'value': eid}]
-        with pytest.raises(ckan.logic.NotFound):
-            imp.find_package('some-eid')
-        id1 = api.action.package_create(name='p1', extras=extras('a'))['id']
-        assert imp.find_package('a')['id'] == id1
-        with pytest.raises(ckan.logic.NotFound):
-            imp.find_package('some-eid')
-        api.action.package_create(name='p2', extras=extras('a'))['id']
-        with pytest.raises(RuntimeError):
-            imp.find_package('a')
-
     def test_logging_prefix(self, imp, caplog):
         '''
         Test that log messages are prefixed with the importer ID.
