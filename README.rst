@@ -9,7 +9,11 @@ ckanext-importer
 
 A CKAN_ extension for easily importing (meta-)data into CKAN.
 
+For details, please refer to the documentation_.
+
 .. _CKAN: https://www.ckan.org
+
+.. _documentation: https://ckanext-importer.readthedocs.io/en/latest/
 
 
 License
