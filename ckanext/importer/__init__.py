@@ -34,6 +34,9 @@ from .utils import (DictWrapper, context_manager_method, replace_dict,
                     solr_escape)
 
 
+__all__ = ['Importer', 'OnError']
+
+
 __version__ = '0.1.0'
 
 
@@ -116,14 +119,25 @@ class Entity(DictWrapper):
 class OnError(Enum):
     '''
     Error handling constants.
+
+    Used for the ``on_error`` argument of
+    :py:meth:`.Importer.sync_package`,
+    :py:meth:`.Package.sync_resource`, and
+    :py:meth:`.Resource.sync_view`.
     '''
-    #: Reraise the exception
+    #: Reraise the exception. If the entity was created at the beginning
+    #: of the current context manager (i.e. if no entity for that EID
+    #: existed before) then that entity is deleted before the exception
+    #: is reraised.
     reraise = 1
 
-    #: Swallow the exception and keep the old version of the entity
+    #: Swallow the exception and keep the old version of the entity. If
+    #: the entity was created at the beginning of the current context
+    #: manager (i.e. if no entity for that EID existed before) then that
+    #: entity is not kept.
     keep = 2
 
-    #: Swallow the exception and delete the entity
+    #: Swallow the exception and delete the entity.
     delete = 3
 
 
@@ -205,6 +219,43 @@ class EntitySyncManager(object):
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
 class Importer(object):
+    '''
+    An importer.
+
+    This class allows you to sync packages (and, from there, resources
+    and views) between an external data source and CKAN.
+
+    ``id`` is the ID of this importer. The ID needs to be unique among
+    all importers used on this CKAN instance. It is converted to Unicode
+    automatically.
+
+    ``api`` is an optional instance of ``ckanapi.LocalCKAN`` or
+    ``ckanapi.RemoteCKAN`` and provides the CKAN instance with to sync
+    data with. If not given it defaults to ``ckanapi.LocalCKAN``, i.e.
+    the currently running local CKAN instance.
+
+    ``default_owner_org`` is the default setting for the ``owner_org``
+    field of packages created via :py:meth:`.sync_package` and can be
+    either the name or the ID of an existing CKAN organization.
+
+    .. automethod:: sync_package(eid, on_error=OnError.keep)
+
+       Sync a package.
+
+       This is a context manager that returns a :py:class:`Package`
+       instance for the CKAN package corresponding to the given EID.
+       The package can then be modified inside the context manager. Once
+       the context manager exits, the modified package is uploaded to
+       CKAN.
+
+       If no package exists for the given EID then one is created.
+
+       If the package is not modified inside the context manager then it
+       is not re-uploaded to CKAN.
+
+       `on_error` is an instance of :py:class:`OnError` and controls how
+       exceptions inside the context manager are handled.
+    '''
 
     class _PrefixLoggerAdapter(logging.LoggerAdapter):
         '''
@@ -228,6 +279,15 @@ class Importer(object):
     def delete_unsynced_packages(self):
         '''
         Delete packages that have not been synced.
+
+        This method deletes all packages belonging to this importer for
+        which :py:meth:`.sync_package` has not been called since this
+        :py:class:`Importer` instance has been created.
+
+        It is intended to be called after all desired packages have been
+        synced to delete those CKAN packages corresponding to objects
+        that have been removed from the data source since the last
+        import.
         '''
         for pkg_dict in self._find_packages():
             extras = ExtrasDictView(pkg_dict['extras'])
@@ -239,6 +299,7 @@ class Importer(object):
 
     @context_manager_method
     class sync_package(EntitySyncManager):
+        # Documentation is in the class docstring
         def _find_entity(self):
             pkg_dict = self._outer._find_package(self._eid)
             return Package(self._eid, pkg_dict, self._outer)
@@ -325,11 +386,58 @@ class Package(Entity):
     '''
     Wrapper around a CKAN package dict.
 
-    Not to be instantiated directly. Use ``Importer.sync_package``
-    instead.
+    Not to be instantiated directly. Use
+    :py:meth:`Importer.sync_package` instead.
+
+    The package can be modified using the standard `dict`-interface::
+
+        with imp.sync_package('my-eid') as pkg:
+            pkg['title'] = 'A new title'
+
+    .. automethod:: sync_resource(eid, on_error=OnError.keep)
+
+       Sync a resource of this package.
+
+       This is a context manager that returns a :py:class:`Resource`
+       instance for the package's CKAN resource corresponding to the
+       given EID. The resource can then be modified inside the context
+       manager. Once the context manager exits, the modified resource is
+       uploaded to CKAN.
+
+       If no resource exists for the given EID then one is created.
+
+       If the resource is not modified inside the context manager then
+       it is not re-uploaded to CKAN.
+
+       `on_error` is an instance of :py:class:`OnError` and controls how
+       exceptions inside the context manager are handled.
     '''
     def __init__(self, eid, pkg_dict, imp):
         super(Package, self).__init__(eid, pkg_dict, parent=imp, imp=imp)
+
+        #: `dict`-interface for package extras.
+        #:
+        #: CKAN stores package extras as a list of key/value dicts,
+        #: which makes modifying them cumbersome. This attribute allows
+        #: you to access the extras like a regular `dict` instead::
+        #:
+        #:     with imp.sync_package('my-eid') as pkg:
+        #:         pkg.extras['my-extra'] = 'some value'
+        #:
+        #: Reading an extra returns the value of the first extra with
+        #: the given key or raises a `KeyError` if no extra with that
+        #: key exists.
+        #:
+        #: Writing an extra overwrites the value of the first extra with
+        #: the given key or appends a new extra at the end of the extras
+        #: list if no extra with the given key exists.
+        #:
+        #: Deleting an extra deletes the first extra with the given key
+        #: or raises a `KeyError` when no extra with that key exists.
+        #:
+        #: If you need more control regarding extras with duplicate keys
+        #: and the order of extras then you need to manage extras
+        #: manually (using `pkg['extras']` instead of `pkg.extras`).
         self.extras = ExtrasDictView(pkg_dict['extras'])
 
     def _upload(self):
@@ -345,6 +453,15 @@ class Package(Entity):
     def delete_unsynced_resources(self):
         '''
         Delete resources that have not been synced.
+
+        This method deletes all resources belonging to this package for
+        which :py:meth:`.sync_resource` has not been called since this
+        :py:class:`Package` instance has been created.
+
+        It is intended to be called after all desired resources of this
+        package have been synced to delete those CKAN resources
+        corresponding to objects that have been removed from the data
+        source since the last import.
         '''
         for res_dict in list(self['resources']):
             eid = res_dict['ckanext_importer_resource_eid']
@@ -355,7 +472,7 @@ class Package(Entity):
 
     @context_manager_method
     class sync_resource(EntitySyncManager):
-
+        # Documentation is in the class docstring
         def _find_entity(self):
             res_dicts = [r for r in self._outer['resources']
                          if r['ckanext_importer_resource_eid'] == self._eid]
@@ -393,7 +510,31 @@ class Resource(Entity):
     '''
     Wrapper around a CKAN resource dict.
 
-    Do not instantiate directly, use ``Package.sync_resource`` instead.
+    Do not instantiate directly, use
+    :py:meth:`Package.sync_resource` instead.
+
+    The resource can be modified using the standard `dict`-interface::
+
+        with pkg.sync_resource('my-eid') as res:
+            res['name'] = 'A new name'
+
+    .. automethod:: sync_view(eid, on_error=OnError.keep)
+
+       Sync a view of this resource.
+
+       This is a context manager that returns a :py:class:`View`
+       instance for the resource's CKAN view corresponding to the given
+       EID. The view can then be modified inside the context manager.
+       Once the context manager exits, the modified resource is uploaded
+       to CKAN.
+
+       If no view exists for the given EID then one is created.
+
+       If the view is not modified inside the context manager then
+       it is not re-uploaded to CKAN.
+
+       `on_error` is an instance of :py:class:`OnError` and controls how
+       exceptions inside the context manager are handled.
     '''
     def _delete(self):
         id = self['id']
@@ -424,6 +565,14 @@ class Resource(Entity):
     def delete_unsynced_views(self):
         '''
         Delete views that have not been synced.
+
+        This method deletes all views belonging to this resource for
+        which :py:meth:`.sync_view` has not been called since this
+        :py:class:`Resource` instance has been created.
+
+        It is intended to be called after all desired views of this
+        resource have been synced to delete those CKAN views that are no
+        longer desired.
         '''
         for eid, id in list(self._get_views_map().items()):
             if eid not in self._synced_child_eids:
@@ -433,7 +582,7 @@ class Resource(Entity):
 
     @context_manager_method
     class sync_view(EntitySyncManager):
-
+        # Documentation is in the class docstring
         def _find_entity(self):
             views = self._outer._get_views_map()
             try:
@@ -451,7 +600,13 @@ class View(Entity):
     '''
     Wrapper around a CKAN view.
 
-    Do not instantiate directly. Use ``Resource.sync_view`` instead.
+    Do not instantiate directly. Use
+    :py:meth:`Resource.sync_view` instead.
+
+    The view can be modified using the standard `dict`-interface::
+
+        with res.sync_view('my-eid') as view:
+            view['title'] = 'A new title'
     '''
 
     # FIXME: When we update the resource's ckanext_importer_views field
