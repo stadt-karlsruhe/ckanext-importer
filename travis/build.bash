@@ -75,5 +75,13 @@ echo "Initialising CKAN database..."
 paster --plugin=ckan db init -c test.ini
 
 
+#
+# DOCS
+#
+
+echo "Building the docs..."
+./make_docs.sh
+
+
 echo "travis-build.bash is done."
 
