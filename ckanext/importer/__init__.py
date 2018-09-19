@@ -189,6 +189,15 @@ class EntitySyncManager(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         entity = self._entity
+
+        def delete():
+            try:
+                entity._delete()
+            except Exception as e:
+                entity._log.exception('Error while deleting {}: {}'.format(entity, e))
+                if self._on_error == OnError.reraise:
+                    raise
+
         if exc_type is not None:
             if self._just_created:
                 # If the entity was created at the beginning of the context
@@ -196,11 +205,11 @@ class EntitySyncManager(object):
                 # setting
                 entity._log.error('Newly created {} will not be kept due to an error: {}'.format(entity, exc_val),
                                   exc_info=(exc_type, exc_val, exc_tb))
-                entity._delete()
+                delete()
             elif self._on_error == OnError.delete:
                 entity._log.error('Deleting existing {} due to an error: {}'.format(entity, exc_val),
                                   exc_info=(exc_type, exc_val, exc_tb))
-                entity._delete()
+                delete()
             else:
                 # OnError.keep and OnError.reraise
                 entity._log.error('Changes to {} will not be uploaded due to an error: {}'.format(entity, exc_val),
@@ -208,10 +217,21 @@ class EntitySyncManager(object):
             return self._on_error != OnError.reraise  # Swallow/reraise
         if entity._to_be_deleted:
             entity._log.debug('Deleting {}'.format(entity))
-            entity._delete()
+            delete()
         elif entity._is_modified():
             entity._log.debug('Uploading {}'.format(entity))
-            entity._upload()
+            try:
+                entity._upload()
+            except Exception as e:
+                entity._log.exception('Error while uploading {}: {}'.format(entity, e))
+                if self._just_created:
+                    entity._log.error('Newly created {} will not be kept after failed upload'.format(entity))
+                    delete()
+                elif self._on_error == OnError.delete:
+                    entity._log.error('Deleting {} after failed upload'.format(entity))
+                    delete()
+                if self._on_error == OnError.reraise:
+                    raise
         else:
             entity._log.debug('{} has not been modified'.format(entity))
 

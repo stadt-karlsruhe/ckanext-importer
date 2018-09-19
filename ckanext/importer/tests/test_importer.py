@@ -25,15 +25,124 @@ import StringIO
 
 import pytest
 import mock
+from sealedmock import seal
 
 import ckanapi
 import ckan.logic
 from ckan.tests.factories import Organization
 
-from ckanext.importer import Entity, ExtrasDictView, Importer, OnError
+from ckanext.importer import (Entity, EntitySyncManager, ExtrasDictView,
+                              Importer, OnError)
 
 
 # See conftest.py for the definition of the pytest fixtures
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG)
+
+
+def _mock_entity(*args, **kwargs):
+    entity = mock.Mock()
+    entity._log = log
+    entity._to_be_deleted = False
+    return entity
+
+
+class _MockESM(EntitySyncManager):
+    def __init__(self, *args, **kwargs):
+        super(_MockESM, self).__init__(*args, **kwargs)
+        self._outer = mock.Mock()
+
+
+class _MockCreatingESM(_MockESM):
+    def _find_entity(self):
+        raise ckan.logic.NotFound
+
+    _create_entity = _mock_entity
+
+
+class _MockFindingESM(_MockESM):
+    _find_entity = _mock_entity
+
+
+def _filter_logs(records, level):
+    return [r.message for r in records if r.levelno >= level]
+
+
+class TestEntitySyncManager(object):
+
+    @pytest.mark.parametrize("just_created", [True, False])
+    @pytest.mark.parametrize("on_error", [OnError.delete, OnError.keep, OnError.reraise])
+    def test_exception_during_upload(self, caplog, just_created, on_error):
+        '''
+        Test error handling during upload.
+        '''
+        ESM = _MockCreatingESM if just_created else _MockFindingESM
+        try:
+            with ESM('1', on_error=on_error) as entity:
+                entity._is_modified.return_value = True
+                entity._upload.side_effect = ValueError('Oops')
+                entity._delete.return_value = None
+        except ValueError:
+            assert on_error == OnError.reraise
+        else:
+            assert on_error != OnError.reraise
+        seal(entity)
+        assert entity._delete.called == just_created or (on_error == OnError.delete)
+        logs = _filter_logs(caplog.records, logging.ERROR)
+        assert len(logs) == 2 if just_created else 1
+        assert 'Error while uploading' in logs[0]
+        if just_created:
+            assert 'Newly created' in logs[1]
+
+    @pytest.mark.parametrize("just_created", [True, False])
+    @pytest.mark.parametrize("on_error", [OnError.delete, OnError.keep, OnError.reraise])
+    def test_exception_during_deletion(self, caplog, just_created, on_error):
+        '''
+        Test error handling during deletion.
+        '''
+        ESM = _MockCreatingESM if just_created else _MockFindingESM
+        try:
+            with ESM('1', on_error=on_error) as entity:
+                entity._is_modified.return_value = True
+                entity._to_be_deleted = True
+                entity._delete.side_effect = ValueError('Oops')
+        except ValueError:
+            assert on_error == OnError.reraise
+        else:
+            assert on_error != OnError.reraise
+        seal(entity)
+        logs = _filter_logs(caplog.records, logging.ERROR)
+        assert len(logs) == 1
+        assert 'Error while deleting' in logs[0]
+
+    @pytest.mark.parametrize("just_created", [True, False])
+    @pytest.mark.parametrize("on_error", [OnError.delete, OnError.keep, OnError.reraise])
+    def test_exception_during_error_handling(self, caplog, just_created, on_error):
+        '''
+        Test error handling during error handling.
+        '''
+        ESM = _MockCreatingESM if just_created else _MockFindingESM
+        try:
+            with ESM('1', on_error=on_error) as entity:
+                entity._delete.side_effect = ValueError('Oops')
+                raise ValueError('Oops')
+        except ValueError:
+            assert on_error == OnError.reraise
+        else:
+            assert on_error != OnError.reraise
+        seal(entity)
+        logs = _filter_logs(caplog.records, logging.ERROR)
+        should_be_deleted = just_created or (on_error == OnError.delete)
+        assert len(logs) == 2 if should_be_deleted else 1
+        if just_created:
+            assert 'Newly created' in logs[0]
+        elif on_error == OnError.delete:
+            assert 'Deleting existing' in logs[0]
+        else:
+            assert 'Changes to' in logs[0]
+        if should_be_deleted:
+            assert 'Error while deleting' in logs[1]
 
 
 class TestImporter(object):

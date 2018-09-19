@@ -2,3 +2,4 @@ pytest>=3.7.0
 pytest-cov>=2.5.1
 mock>=2.0.0
 Sphinx>=1.7.7
+sealedmock>=1.0.1
