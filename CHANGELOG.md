@@ -10,6 +10,11 @@ project uses [Semantic Versioning].
 - The `on_error` parameter for `Importer.sync_package`, `Package.sync_resource`,
   and `Resource.sync_view` now defaults to `OnError.reraise`.
 
+### Fixed
+
+- `Importer.sync_package` did not find existing private packages
+
+
 ## 0.1.0
 
 - First release

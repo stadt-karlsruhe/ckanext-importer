@@ -281,6 +281,16 @@ class TestImporter(object):
             with imp.sync_package(eid) as pkg:
                 pass
 
+    def test_private_datasets(self, imp):
+        '''
+        Test creating private datasets.
+        '''
+        with imp.sync_package('1') as pkg1:
+            pkg1['owner_org'] = factories.Organization()['id']
+            pkg1['private'] = True
+        with imp.sync_package('1') as pkg2:
+            assert pkg1['id'] == pkg2['id']
+
     def test_package_update(self, api, imp):
         '''
         Test update of a package.

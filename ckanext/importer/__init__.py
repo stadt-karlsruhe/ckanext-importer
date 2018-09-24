@@ -362,7 +362,8 @@ class Importer(object):
         fq = ' AND '.join('extras_{}:"{}"'.format(*item)
                           for item in extras.items())
         # FIXME: Support for paging
-        result = self._api.action.package_search(fq=fq, rows=1000)
+        result = self._api.action.package_search(fq=fq, rows=1000,
+                                                 include_private=True)
 
         # CKAN's search is based on Solr, which by default doesn't support
         # searching for exact matches. Hence searching for importer ID "x"
