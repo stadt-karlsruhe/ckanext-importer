@@ -146,7 +146,7 @@ class EntitySyncManager(object):
 
     Do not instantiate directly.
     '''
-    def __init__(self, eid, on_error=OnError.keep):
+    def __init__(self, eid, on_error=OnError.reraise):
         self._eid = unicode(eid)
         if not isinstance(on_error, OnError):
             raise TypeError('on_error must be of type OnError')
@@ -257,7 +257,7 @@ class Importer(object):
     field of packages created via :py:meth:`.sync_package` and can be
     either the name or the ID of an existing CKAN organization.
 
-    .. automethod:: sync_package(eid, on_error=OnError.keep)
+    .. automethod:: sync_package(eid, on_error=OnError.reraise)
 
        Sync a package.
 
@@ -413,7 +413,7 @@ class Package(Entity):
         with imp.sync_package('my-eid') as pkg:
             pkg['title'] = 'A new title'
 
-    .. automethod:: sync_resource(eid, on_error=OnError.keep)
+    .. automethod:: sync_resource(eid, on_error=OnError.reraise)
 
        Sync a resource of this package.
 
@@ -537,7 +537,7 @@ class Resource(Entity):
         with pkg.sync_resource('my-eid') as res:
             res['name'] = 'A new name'
 
-    .. automethod:: sync_view(eid, on_error=OnError.keep)
+    .. automethod:: sync_view(eid, on_error=OnError.reraise)
 
        Sync a view of this resource.
 
