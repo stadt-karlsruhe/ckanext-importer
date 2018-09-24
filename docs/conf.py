@@ -23,10 +23,27 @@ project = u'ckanext.importer'
 copyright = u'2018, Stadt Karlsruhe'
 author = u'Stadt Karlsruhe'
 
-# The short X.Y version
-version = u''
+# We don't simply import ckanext.importer here, since that would require us to
+# install the `ckan` package, which leads to further problems with namespace
+# problems. For autodoc we solve this using mock imports (see below), but here
+# we simply extract the version number manually.
+import io
+import os.path
+import re
+HERE = os.path.abspath(os.path.dirname(__file__))
+INIT_PY = os.path.join(HERE, '..', 'ckanext', 'importer', '__init__.py')
+version = None
+with io.open(INIT_PY, encoding='utf-8') as f:
+    for line in f:
+        m = re.match(r'__version__\s*=\s*[\'"](.*)[\'"]', line)
+        if m:
+            version = m.groups()[0]
+            break
+if version is None:
+    raise RuntimeError('Could not extract version from "{}".'.format(INIT_PY))
+
 # The full version, including alpha/beta/rc tags
-release = u''
+release = version
 
 
 # -- General configuration ---------------------------------------------------
@@ -119,55 +136,7 @@ html_sidebars = {
 htmlhelp_basename = 'ckanextimporterdoc'
 
 
-# -- Options for LaTeX output ------------------------------------------------
-
-latex_elements = {
-    # The paper size ('letterpaper' or 'a4paper').
-    #
-    # 'papersize': 'letterpaper',
-
-    # The font size ('10pt', '11pt' or '12pt').
-    #
-    # 'pointsize': '10pt',
-
-    # Additional stuff for the LaTeX preamble.
-    #
-    # 'preamble': '',
-
-    # Latex figure (float) alignment
-    #
-    # 'figure_align': 'htbp',
-}
-
-# Grouping the document tree into LaTeX files. List of tuples
-# (source start file, target name, title,
-#  author, documentclass [howto, manual, or own class]).
-latex_documents = [
-    (master_doc, 'ckanextimporter.tex', u'ckanext.importer Documentation',
-     u'Stadt Karlsruhe', 'manual'),
-]
-
-
-# -- Options for manual page output ------------------------------------------
-
-# One entry per manual page. List of tuples
-# (source start file, name, description, authors, manual section).
-man_pages = [
-    (master_doc, 'ckanextimporter', u'ckanext.importer Documentation',
-     [author], 1)
-]
-
-
-# -- Options for Texinfo output ----------------------------------------------
-
-# Grouping the document tree into Texinfo files. List of tuples
-# (source start file, target name, title, author,
-#  dir menu entry, description, category)
-texinfo_documents = [
-    (master_doc, 'ckanextimporter', u'ckanext.importer Documentation',
-     author, 'ckanextimporter', 'One line description of project.',
-     'Miscellaneous'),
-]
-
-
 # -- Extension configuration -------------------------------------------------
+
+autodoc_mock_imports = ['ckan']
+
