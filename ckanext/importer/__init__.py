@@ -46,7 +46,7 @@ class Entity(DictWrapper):
 
     Not to be instantiated directly.
     '''
-    def __init__(self, eid, data_dict, parent, imp=None):
+    def __init__(self, eid, data_dict, parent):
         '''
         Constructor.
 
@@ -60,9 +60,8 @@ class Entity(DictWrapper):
         super(Entity, self).__init__(data_dict)
         self._eid = eid
         self._parent = parent
-        self._imp = imp or parent._imp
-        self._api = self._imp._api
-        self._log = self._imp._log
+        self._api = parent._api
+        self._log = parent._log
         self._mark_as_unmodified()
         self._to_be_deleted = False
         self._synced_child_eids = set()
@@ -432,8 +431,8 @@ class Package(Entity):
        `on_error` is an instance of :py:class:`OnError` and controls how
        exceptions inside the context manager are handled.
     '''
-    def __init__(self, eid, pkg_dict, imp):
-        super(Package, self).__init__(eid, pkg_dict, parent=imp, imp=imp)
+    def __init__(self, eid, pkg_dict, parent):
+        super(Package, self).__init__(eid, pkg_dict, parent)
 
         #: `dict`-interface for package extras.
         #:

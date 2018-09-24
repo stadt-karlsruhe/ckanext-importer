@@ -20,6 +20,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from copy import deepcopy
 import logging
 import StringIO
 
@@ -29,10 +30,10 @@ from sealedmock import seal
 
 import ckanapi
 import ckan.logic
-from ckan.tests.factories import Organization
+from ckan.tests import factories
 
 from ckanext.importer import (Entity, EntitySyncManager, ExtrasDictView,
-                              Importer, OnError)
+                              Importer, OnError, Package,  Resource, View)
 
 
 # See conftest.py for the definition of the pytest fixtures
@@ -71,8 +72,89 @@ def _filter_logs(records, level):
 
 class TestEntitySyncManager(object):
 
-    @pytest.mark.parametrize("just_created", [True, False])
-    @pytest.mark.parametrize("on_error", [OnError.delete, OnError.keep, OnError.reraise])
+    def test_nonstring_eid(self):
+        '''
+        Test that the EID is converted to a string.
+        '''
+        eids = [
+            1,
+            True,
+            None,
+            {'foo': 'bar'},
+            ['foo', 'bar'],
+        ]
+        for eid in eids:
+            assert isinstance(EntitySyncManager(eid)._eid, unicode)
+
+    def test_find_entity(self):
+        '''
+        Test finding an entity.
+        '''
+        x = mock.Mock()
+
+        class ESM(EntitySyncManager):
+            _outer = mock.Mock()
+
+            def _find_entity(self):
+                return x
+
+        with ESM('eid') as entity:
+            assert entity is x
+
+    def test_create_entity(self):
+        '''
+        Test creating an entity.
+        '''
+        x = mock.Mock()
+
+        class ESM(EntitySyncManager):
+            _outer = mock.Mock()
+
+            def _find_entity(self):
+                raise ckan.logic.NotFound
+
+            def _create_entity(self):
+                return x
+
+        with ESM('eid') as entity:
+            assert entity is x
+
+    @pytest.mark.parametrize('esm', [_MockCreatingESM, _MockFindingESM])
+    def test_unmodified_entity(self, esm):
+        '''
+        Test not modifying an entity.
+        '''
+        with esm('1') as entity:
+            entity._is_modified.return_value = False
+            entity._upload.return_value = None
+        seal(entity)
+        entity._upload.assert_not_called()
+
+    @pytest.mark.parametrize('esm', [_MockCreatingESM, _MockFindingESM])
+    def test_upload_entity(self, esm):
+        '''
+        Test uploading a modified entity.
+        '''
+        with esm('1') as entity:
+            entity._upload.return_value = None
+        seal(entity)
+        entity._upload.assert_called_once()
+
+    @pytest.mark.parametrize('esm', [_MockCreatingESM, _MockFindingESM])
+    def test_delete_existing_entity(self, esm):
+        '''
+        Test deleting an entity.
+        '''
+        with esm('1') as entity:
+            entity._to_be_deleted = True
+            entity._upload.return_value = None
+            entity._delete.return_value = None
+        seal(entity)
+        entity._upload.assert_not_called()
+        entity._delete.assert_called_once()
+
+    @pytest.mark.parametrize('just_created', [True, False])
+    @pytest.mark.parametrize('on_error', [OnError.delete, OnError.keep, OnError.reraise])
     def test_exception_during_upload(self, caplog, just_created, on_error):
         '''
         Test error handling during upload.
@@ -118,9 +200,9 @@ class TestEntitySyncManager(object):
 
     @pytest.mark.parametrize("just_created", [True, False])
     @pytest.mark.parametrize("on_error", [OnError.delete, OnError.keep, OnError.reraise])
-    def test_exception_during_error_handling(self, caplog, just_created, on_error):
+    def test_exception_in_context_manager(self, caplog, just_created, on_error):
         '''
-        Test error handling during error handling.
+        Test handling exceptions raised inside the context manager.
         '''
         ESM = _MockCreatingESM if just_created else _MockFindingESM
         try:
@@ -174,23 +256,6 @@ class TestImporter(object):
         for id in ids:
             imp = Importer(id)
             assert isinstance(imp.id, unicode)
-
-    def test_nonstring_package_eids(self, imp):
-        '''
-        Test that package EIDs don't have to be strings.
-        '''
-        eids = [
-            1,
-            True,
-            None,
-            {'foo': 'bar'},
-            ['foo', 'bar'],
-        ]
-        ids = set()
-        for eid in eids:
-            with imp.sync_package(eid) as pkg:
-                ids.add(pkg['id'])
-        assert len(ids) == len(eids)
 
     def test_default_names_generation_during_package_creation(self, imp):
         '''
@@ -355,7 +420,7 @@ class TestImporter(object):
         '''
         Test speciyfing the ``default_owner_org`` option.
         '''
-        org_id = Organization()['id']
+        org_id = factories.Organization()['id']
         imp = imp_factory(default_owner_org=org_id)
         with imp.sync_package('x') as pkg:
             assert pkg['owner_org'] == org_id
@@ -384,24 +449,12 @@ class TestImporter(object):
         with pytest.raises(ckan.logic.NotFound):
             api.action.package_show(id=id)
 
-    def test_exception_during_package_creation_keep(self, api, imp, caplog):
+    @pytest.mark.parametrize("on_error", [OnError.keep, OnError.delete])
+    def test_exception_during_package_creation_keep_delete(self, api, imp, caplog, on_error):
         '''
-        Test error handling during package creation with on_error=keep.
+        Test error handling during package creation with on_error={keep, delete}.
         '''
-        with imp.sync_package('x', on_error=OnError.keep) as pkg:
-            id = pkg['id']
-            caplog.clear()
-            raise ValueError('Oops')
-        assert caplog.records[0].levelno == logging.ERROR
-        assert 'Oops' in caplog.records[0].message
-        with pytest.raises(ckan.logic.NotFound):
-            api.action.package_show(id=id)
-
-    def test_exception_during_package_creation_delete(self, api, imp, caplog):
-        '''
-        Test error handling during package creation with on_error=delete.
-        '''
-        with imp.sync_package('x', on_error=OnError.delete) as pkg:
+        with imp.sync_package('x', on_error=on_error) as pkg:
             id = pkg['id']
             caplog.clear()
             raise ValueError('Oops')
@@ -461,22 +514,28 @@ class TestImporter(object):
 
 class TestPackage(object):
 
-    def test_nonstring_resource_eids(self, pkg):
+    def test_upload(self, api, imp):
         '''
-        Test that resource EIDs don't have to be strings.
+        Test uploading a package.
         '''
-        eids = [
-            1,
-            True,
-            None,
-            {'foo': 'bar'},
-            ['foo', 'bar'],
-        ]
-        ids = set()
-        for eid in eids:
-            with pkg.sync_resource(eid) as res:
-                ids.add(res['id'])
-        assert len(ids) == len(eids)
+        pkg_dict = factories.Dataset()
+        pkg = Package('1', pkg_dict, imp)
+        title = 'A new title'
+        pkg['title'] = title
+        pkg._upload()
+        assert pkg_dict == api.action.package_show(id=pkg_dict['id'])
+        assert pkg_dict['title'] == title
+
+    def test_delete(self, api, imp):
+        '''
+        Test deleting a package.
+        '''
+        pkg_dict = factories.Dataset()
+        pkg = Package('1', pkg_dict, imp)
+        pkg._delete()
+        # Make sure that the package wasn't just moved to the trash but
+        # completely purged by creating a package with the same name.
+        api.action.package_create(name=pkg_dict['name'])
 
     def test_resource_creation(self, api, pkg):
         '''
@@ -756,24 +815,12 @@ class TestPackage(object):
         with pytest.raises(ckanapi.NotFound):
             api.action.resource_show(id=id)
 
-    def test_exception_during_resource_creation_keep(self, api, pkg, caplog):
+    @pytest.mark.parametrize("on_error", [OnError.keep, OnError.delete])
+    def test_exception_during_resource_creation_keep_delete(self, api, pkg, caplog, on_error):
         '''
-        Test error handling during resource creation with on_error=keep.
+        Test error handling during resource creation with on_error={keep, delete}.
         '''
-        with pkg.sync_resource('x', on_error=OnError.keep) as res:
-            id = res['id']
-            caplog.clear()
-            raise ValueError('Oops')
-        assert caplog.records[0].levelno == logging.ERROR
-        assert 'Oops' in caplog.records[0].message
-        with pytest.raises(ckanapi.NotFound):
-            api.action.resource_show(id=id)
-
-    def test_exception_during_resource_creation_delete(self, api, pkg, caplog):
-        '''
-        Test error handling during resource creation with on_error=delete.
-        '''
-        with pkg.sync_resource('x', on_error=OnError.delete) as res:
+        with pkg.sync_resource('x', on_error=on_error) as res:
             id = res['id']
             caplog.clear()
             raise ValueError('Oops')
@@ -833,24 +880,28 @@ class TestPackage(object):
 
 class TestResource(object):
 
-    def test_nonstring_view_eids(self, res):
+    def test_upload(self, api, imp):
         '''
-        Test that view EIDs don't have to be strings.
+        Test uploading a resource.
         '''
-        eids = [
-            1,
-            True,
-            None,
-            {'foo': 'bar'},
-            ['foo', 'bar'],
-        ]
-        ids = set()
-        for eid in eids:
-            with res.sync_view(eid) as view:
-                view['title'] = 'title'
-                view['view_type'] = 'text_view'
-            ids.add(view['id'])
-        assert len(ids) == len(eids)
+        res_dict = factories.Resource()
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        name = 'A new name'
+        res['name'] = name
+        res._upload()
+        assert res_dict == api.action.resource_show(id=res_dict['id'])
+        assert res_dict['name'] == name
+
+    def test_delete(self, api, imp):
+        res_dict = factories.Resource()
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        res._delete()
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.resource_show(id=res_dict['id'])
 
     def test_view_creation(self, api, res):
         '''
@@ -860,7 +911,7 @@ class TestResource(object):
         with res.sync_view('x') as view:
             assert view == {}
             view['title'] = title
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         assert api.action.resource_view_show(id=view['id'])['title'] == title
 
     def test_view_update(self, api, res):
@@ -870,7 +921,7 @@ class TestResource(object):
         eid = 'y'
         with res.sync_view(eid) as view:
             view['title'] = 'title'
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         id = view['id']
         for i in range(3):
             title = str(i)
@@ -883,7 +934,7 @@ class TestResource(object):
         Test not modifying an existing view.
         '''
         with res.sync_view('x') as view:
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
             view['title'] = 'Title'
         with mock.patch('ckanext.importer.View._upload') as upload:
             with res.sync_view('x'):
@@ -899,7 +950,7 @@ class TestResource(object):
         '''
         with res.sync_view('a') as view:
             view['title'] = 'a'
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         id_a = view['id']
         with res.sync_view('b') as view:
             view.delete()
@@ -912,14 +963,14 @@ class TestResource(object):
         '''
         with res.sync_view('a') as view:
             view['title'] = 'a'
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         id_a = view['id']
         with res.sync_view('b') as view:
             view['title'] = 'b'
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         with res.sync_view('c') as view:
             view['title'] = 'c'
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
         id_c = view['id']
         with res.sync_view('b') as view:
             view.delete()
@@ -937,7 +988,7 @@ class TestResource(object):
             for view_eid in view_eids:
                 with res.sync_view(view_eid) as view:
                     view['title'] = 'title'
-                    view['view_type'] = 'text_view'
+                    view['view_type'] = 'image_view'
                 view_ids[view_eid] = view['id']
         with pkg.sync_resource(res_eid) as res:
             with res.sync_view(view_eids[1]) as view:
@@ -978,22 +1029,12 @@ class TestResource(object):
         assert 'Oops' in caplog.records[0].message
         assert not api.action.resource_view_list(id=res['id'])
 
-    def test_exception_during_view_creation_keep(self, api, res, caplog):
+    @pytest.mark.parametrize("on_error", [OnError.keep, OnError.delete])
+    def test_exception_during_view_creation_keep(self, api, res, caplog, on_error):
         '''
-        Test error handling during view creation with on_error=keep.
+        Test error handling during view creation with on_error={keep, delete}.
         '''
-        with res.sync_view('x', on_error=OnError.keep):
-            caplog.clear()
-            raise ValueError('Oops')
-        assert caplog.records[0].levelno == logging.ERROR
-        assert 'Oops' in caplog.records[0].message
-        assert not api.action.resource_view_list(id=res['id'])
-
-    def test_exception_during_view_creation_delete(self, api, res, caplog):
-        '''
-        Test error handling during view creation with on_error=delete.
-        '''
-        with res.sync_view('x', on_error=OnError.delete):
+        with res.sync_view('x', on_error=on_error):
             caplog.clear()
             raise ValueError('Oops')
         assert caplog.records[0].levelno == logging.ERROR
@@ -1006,7 +1047,7 @@ class TestResource(object):
         '''
         eid = 'x'
         with res.sync_view(eid) as view:
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
             view['title'] = 'title'
         id = view['id']
         with pytest.raises(ValueError):
@@ -1024,7 +1065,7 @@ class TestResource(object):
         '''
         eid = 'x'
         with res.sync_view(eid) as view:
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
             view['title'] = 'title'
         id = view['id']
         with res.sync_view(eid, on_error=OnError.keep):
@@ -1041,7 +1082,7 @@ class TestResource(object):
         '''
         eid = 'x'
         with res.sync_view(eid) as view:
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
             view['title'] = 'title'
         with res.sync_view(eid, on_error=OnError.delete):
             caplog.clear()
@@ -1053,11 +1094,68 @@ class TestResource(object):
 
 class TestView(object):
 
+    def test_upload_when_not_existing(self, api, imp):
+        '''
+        Test uploading a view when it doesn't already exist.
+        '''
+        res_dict = factories.Resource()
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        view_dict = {'title': 'A title', 'view_type': 'image_view'}
+        view = View('1', view_dict, res)
+        view._upload()
+        assert view_dict == api.action.resource_view_show(id=view_dict['id'])
+        assert view_dict['resource_id'] == res_dict['id']
+
+    def test_upload_when_existing(self, api, imp):
+        '''
+        Test uploading an existing view.
+        '''
+        view_dict = factories.ResourceView()
+        res_dict = api.action.resource_show(id=view_dict['resource_id'])
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        view = View('1', view_dict, res)
+        title = 'A new title'
+        view['title'] = title
+        view._upload()
+        assert view_dict == api.action.resource_view_show(id=view_dict['id'])
+        assert view_dict['title'] == title
+
+    def test_delete_when_not_existing(self, api, imp):
+        '''
+        Test deleting a view when it doesn't already exist.
+        '''
+        res_dict = factories.Resource()
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        view_dict = {'title': 'A title', 'view_type': 'image_view'}
+        view = View('1', view_dict, res)
+        view._delete()
+
+    def test_delete_when_existing(self, api, imp):
+        '''
+        Test deleting an existing view.
+        '''
+        res_dict = factories.Resource()
+        pkg_dict = api.action.package_show(id=res_dict['package_id'])
+        pkg = Package('1', pkg_dict, imp)
+        res = Resource('1', res_dict, pkg)
+        view_dict = {'title': 'A title', 'view_type': 'image_view'}
+        view = View('1', view_dict, res)
+        view._upload()
+        view._delete()
+        with pytest.raises(ckan.logic.NotFound):
+            api.action.resource_view_show(id=view_dict['id'])
+
     def test_repr(self, res):
         eid = 'a'
         with res.sync_view(eid) as view:
             assert repr(view) == '<View eid={!r}>'.format(eid)
-            view['view_type'] = 'text_view'
+            view['view_type'] = 'image_view'
             view['title'] = 'title'
         assert repr(view) == '<View id={!r} eid={!r}>'.format(view['id'], eid)
 
