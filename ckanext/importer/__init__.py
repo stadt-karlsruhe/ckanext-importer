@@ -237,6 +237,31 @@ class EntitySyncManager(object):
 
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'
 
+
+def _search_packages(api, **kwargs):
+    '''
+    Wrapper around CKAN's ``package_search`` to handle pagination.
+
+    Passes on all keyword arguments to ``package_search`` and yields the
+    found package dicts.
+
+    Transparently handles pagination. You may set the ``rows`` argument
+    to control how many results are returned per call of
+    ``package_search``. Note, however, that the ``start`` argument of
+    ``package_search`` is automatically set by this function.
+    '''
+    kwargs['start'] = 0
+    while True:
+        result = api.action.package_search(**kwargs)
+        for pkg_dict in result['results']:
+            yield pkg_dict
+        num_retrieved = len(result['results'])
+        if kwargs['start'] + num_retrieved == result['count']:
+            # All results have been retrieved
+            break
+        kwargs['start'] += num_retrieved
+
+
 class Importer(object):
     '''
     An importer.
@@ -361,15 +386,14 @@ class Importer(object):
             extras['ckanext_importer_package_eid'] = solr_escape(eid)
         fq = ' AND '.join('extras_{}:"{}"'.format(*item)
                           for item in extras.items())
-        # FIXME: Support for paging
-        result = self._api.action.package_search(fq=fq, rows=1000,
-                                                 include_private=True)
+        pkg_dicts = _search_packages(self._api, fq=fq, rows=1000,
+                                     include_private=True)
 
         # CKAN's search is based on Solr, which by default doesn't support
         # searching for exact matches. Hence searching for importer ID "x"
         # can also return packages with importer ID "x-y". Hence we filter
         # the results again.
-        for pkg_dict in result['results']:
+        for pkg_dict in pkg_dicts:
             extras = ExtrasDictView(pkg_dict['extras'])
             if extras['ckanext_importer_importer_id'] != self.id:
                 continue

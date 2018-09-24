@@ -291,6 +291,32 @@ class TestImporter(object):
         with imp.sync_package('1') as pkg2:
             assert pkg1['id'] == pkg2['id']
 
+    def test_pagination(self, api, imp):
+        '''
+        Test that pagination during package search is taken into account.
+        '''
+        ids = []
+        for i in range(11):
+            extras = [{'key': 'ckanext_importer_importer_id',
+                       'value': imp.id},
+                      {'key': 'ckanext_importer_package_eid',
+                       'value': unicode(i)}]
+            ids.append(api.action.package_create(name='pkg{}'.format(i),
+                       extras=extras)['id'])
+
+        package_search = api.action.package_search
+
+        def mocked_package_search(**kwargs):
+            kwargs['rows'] = 3
+            kwargs['fq'] = None
+            return package_search(**kwargs)
+
+        with mock.patch.object(api.action, 'package_search',
+                        mocked_package_search):
+            for i, id in enumerate(ids):
+                with imp.sync_package(i) as pkg:
+                    assert pkg['id'] == id
+
     def test_package_update(self, api, imp):
         '''
         Test update of a package.
