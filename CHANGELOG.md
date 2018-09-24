@@ -12,7 +12,9 @@ project uses [Semantic Versioning].
 
 ### Fixed
 
-- `Importer.sync_package` did not find existing private packages
+- `Importer.sync_package` did not find existing private packages.
+
+- Improved the handling of errors during uploading of changes to CKAN.
 
 
 ## 0.1.0
