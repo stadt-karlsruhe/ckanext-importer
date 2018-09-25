@@ -156,6 +156,31 @@ via the :py:meth:`Resource.sync_view` method (which returns a
 See the `API Reference`_ for more information.
 
 
+Error Handling
+--------------
+A main design principle of *ckanext.importer* is to keep CKAN's version of the
+imported data in a well-defined state in case of an error. To support different
+use cases, there are different approaches to error handling, which can be
+configured using the ``on_error`` argument of :py:meth:`Importer.sync_package`,
+:py:meth:`Package.sync_resource`, and :py:meth:`Resource.sync_view`:
+
+  - **Re-raise the exception** (:py:attr:`OnError.reraise`): If an exception
+    occurs inside the context manager, log and re-raise it.
+
+    Changes made inside the context manager are not uploaded to CKAN. The
+    previous state of the entity is kept in CKAN. If a new entity was created
+    at the beginning of the context manager then it is deleted
+
+    This is the default behavior.
+
+  - **Swallow the exception and keep the entity** (:py:attr:`OnError.keep`):
+    The exception is logged, but not re-raised.
+
+  - **Swallow the exception and delete the entity**
+    (:py:attr:`OnError.delete`): The exception is logged, but not re-raised.
+    The entity is deleted from CKAN.
+
+
 License
 =======
 
