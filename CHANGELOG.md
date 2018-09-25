@@ -3,7 +3,7 @@
 The format of this file is based on [Keep a Changelog], and this
 project uses [Semantic Versioning].
 
-## [Unreleased]
+## [0.2.0] (2018-09-25)
 
 ### Changed
 
@@ -23,12 +23,13 @@ project uses [Semantic Versioning].
   uploading changes to CKAN.
 
 
-## 0.1.0
+## 0.1.0 (2018-09-12)
 
 - First release
 
 
-[Unreleased]: https://github.com/stadt-karlsruhe/ckanext-importer/compare/v0.1.0...master
+[Unreleased]: https://github.com/stadt-karlsruhe/ckanext-importer/compare/v0.2.0...master
+[0.2.0]: https://github.com/stadt-karlsruhe/ckanext-importer/compare/v0.1.0...v0.2.0
 
 [Keep a Changelog]: http://keepachangelog.com
 [Semantic Versioning]: http://semver.org/

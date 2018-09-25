@@ -37,7 +37,7 @@ from .utils import (DictWrapper, context_manager_method, replace_dict,
 __all__ = ['Importer', 'OnError']
 
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 
 class Entity(DictWrapper):

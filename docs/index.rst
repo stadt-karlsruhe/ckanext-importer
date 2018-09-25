@@ -62,11 +62,11 @@ Installation
        pip install -e git+https://github.com/stadt-karlsruhe/ckanext-importer#egg=ckanext-importer
        pip install -r src/ckanext-importer/requirements.txt
 
-   On a production system you'll probably want to pin a certain `release version`_ of *ckanext.importer* instead:
+   On a production system you'll probably want to pin the latest `release version`_ of *ckanext.importer* instead:
 
    .. code-block:: bash
 
-       pip install -e git+https://github.com/stadt-karlsruhe/ckanext-importer@v0.1.0#egg=ckanext-importer
+       pip install -e git+https://github.com/stadt-karlsruhe/ckanext-importer@v0.2.0#egg=ckanext-importer
 
 3. Restart CKAN. For example, if you're using Apache,
 
