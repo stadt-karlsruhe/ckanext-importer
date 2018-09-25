@@ -175,16 +175,27 @@ class EntitySyncManager(object):
 
     def __enter__(self):
         try:
-            self._entity = self._find_entity()
-            self._just_created = False
-            self._outer._log.debug('Using {}'.format(self._entity))
-        except NotFound:
-            self._entity = self._create_entity()
-            self._just_created = True
-            self._outer._log.debug('Created {}'.format(self._entity))
-        assert self._entity is not None
-        self._entity._mark_as_synced()
-        return self._entity
+            try:
+                self._entity = self._find_entity()
+                self._just_created = False
+                self._outer._log.debug('Using {}'.format(self._entity))
+            except NotFound:
+                self._entity = self._create_entity()
+                self._just_created = True
+                self._outer._log.debug('Created {}'.format(self._entity))
+            assert self._entity is not None
+            self._entity._mark_as_synced()
+            return self._entity
+        except Exception as e:
+            self._outer._log.exception('Error while preparing entity for EID {}: {}'.format(self._eid, e))
+            # There is nothing that we can do here except swallowing or
+            # reraising the exception. In particular, we cannot skip the
+            # `with` block like we would like to do when `on_error` is
+            # `keep` or `delete`. On the other hand, we cannot run the
+            # `with` block either, since we just failed to prepare the
+            # entity on which that block relies. Hence our only option
+            # is to reraise.
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         entity = self._entity
@@ -193,7 +204,7 @@ class EntitySyncManager(object):
             try:
                 entity._delete()
             except Exception as e:
-                entity._log.exception('Error while deleting {}: {}'.format(entity, e))
+                self._outer._log.exception('Error while deleting {}: {}'.format(entity, e))
                 if self._on_error == OnError.reraise:
                     raise
 
@@ -202,37 +213,37 @@ class EntitySyncManager(object):
                 # If the entity was created at the beginning of the context
                 # manager then it is deleted regardless of the on_error
                 # setting
-                entity._log.error('Newly created {} will not be kept due to an error: {}'.format(entity, exc_val),
-                                  exc_info=(exc_type, exc_val, exc_tb))
+                self._outer._log.error('Newly created {} will not be kept due to an error: {}'.format(entity, exc_val),
+                                       exc_info=(exc_type, exc_val, exc_tb))
                 delete()
             elif self._on_error == OnError.delete:
-                entity._log.error('Deleting existing {} due to an error: {}'.format(entity, exc_val),
-                                  exc_info=(exc_type, exc_val, exc_tb))
+                self._outer._log.error('Deleting existing {} due to an error: {}'.format(entity, exc_val),
+                                       exc_info=(exc_type, exc_val, exc_tb))
                 delete()
             else:
                 # OnError.keep and OnError.reraise
-                entity._log.error('Changes to {} will not be uploaded due to an error: {}'.format(entity, exc_val),
-                                  exc_info=(exc_type, exc_val, exc_tb))
+                self._outer._log.error('Changes to {} will not be uploaded due to an error: {}'.format(entity, exc_val),
+                                       exc_info=(exc_type, exc_val, exc_tb))
             return self._on_error != OnError.reraise  # Swallow/reraise
         if entity._to_be_deleted:
-            entity._log.debug('Deleting {}'.format(entity))
+            self._outer._log.debug('Deleting {}'.format(entity))
             delete()
         elif entity._is_modified():
-            entity._log.debug('Uploading {}'.format(entity))
+            self._outer._log.debug('Uploading {}'.format(entity))
             try:
                 entity._upload()
             except Exception as e:
-                entity._log.exception('Error while uploading {}: {}'.format(entity, e))
+                self._outer._log.exception('Error while uploading {}: {}'.format(entity, e))
                 if self._just_created:
-                    entity._log.error('Newly created {} will not be kept after failed upload'.format(entity))
+                    self._outer._log.error('Newly created {} will not be kept after failed upload'.format(entity))
                     delete()
                 elif self._on_error == OnError.delete:
-                    entity._log.error('Deleting {} after failed upload'.format(entity))
+                    self._outer._log.error('Deleting {} after failed upload'.format(entity))
                     delete()
                 if self._on_error == OnError.reraise:
                     raise
         else:
-            entity._log.debug('{} has not been modified'.format(entity))
+            self._outer._log.debug('{} has not been modified'.format(entity))
 
 
 _PACKAGE_NAME_PREFIX = 'ckanext_importer_'

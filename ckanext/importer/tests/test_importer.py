@@ -42,6 +42,12 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
 
+def make_raiser(exc):
+    def raiser(*args, **kwargs):
+        raise exc
+    return raiser
+
+
 def _mock_entity(*args, **kwargs):
     entity = mock.Mock()
     entity._log = log
@@ -53,17 +59,16 @@ class _MockESM(EntitySyncManager):
     def __init__(self, *args, **kwargs):
         super(_MockESM, self).__init__(*args, **kwargs)
         self._outer = mock.Mock()
-
-
-class _MockCreatingESM(_MockESM):
-    def _find_entity(self):
-        raise ckan.logic.NotFound
-
-    _create_entity = _mock_entity
+        self._outer._log = log
 
 
 class _MockFindingESM(_MockESM):
     _find_entity = _mock_entity
+
+
+class _MockCreatingESM(_MockESM):
+    _find_entity = make_raiser(ckan.logic.NotFound)
+    _create_entity = _mock_entity
 
 
 def _filter_logs(records, level):
@@ -118,6 +123,23 @@ class TestEntitySyncManager(object):
 
         with ESM('eid') as entity:
             assert entity is x
+
+    @pytest.mark.parametrize(['esm', 'method_name'], [
+        (_MockCreatingESM, '_create_entity'),
+        (_MockFindingESM, '_find_entity'),
+    ])
+    def test_exception_during_enter(self, caplog, esm, method_name):
+        '''
+        Test error handling during __enter__.
+        '''
+        e = esm('1')
+        setattr(e, method_name, make_raiser(ValueError))
+        with pytest.raises(ValueError):
+            with e:
+                pass
+        logs = _filter_logs(caplog.records, logging.ERROR)
+        assert len(logs) == 1
+        assert 'Error while preparing' in logs[0]
 
     @pytest.mark.parametrize('esm', [_MockCreatingESM, _MockFindingESM])
     def test_unmodified_entity(self, esm):
