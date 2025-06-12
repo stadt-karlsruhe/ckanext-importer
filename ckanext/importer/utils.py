@@ -89,7 +89,7 @@ class context_manager_method(object):
         return NestedCM()
 
 
-class DictWrapper(collections.MutableMapping):
+class DictWrapper(collections.abc.MutableMapping):
     '''
     Wrapper for an existing dict.
 

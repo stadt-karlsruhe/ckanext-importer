@@ -147,7 +147,7 @@ class EntitySyncManager(object):
     Do not instantiate directly.
     '''
     def __init__(self, eid, on_error=OnError.reraise):
-        self._eid = unicode(eid)
+        self._eid = str(eid)
         if not isinstance(on_error, OnError):
             raise TypeError('on_error must be of type OnError')
         self._on_error = on_error
@@ -324,7 +324,7 @@ class Importer(object):
             return self.extra['prefix'] + msg, kwargs
 
     def __init__(self, id, api=None, default_owner_org=None):
-        self.id = unicode(id)
+        self.id = str(id)
         self._api = api or ckanapi.LocalCKAN()
         self.default_owner_org = default_owner_org
         self._synced_child_eids = set()
@@ -396,7 +396,7 @@ class Importer(object):
         if eid is not None:
             extras['ckanext_importer_package_eid'] = solr_escape(eid)
         fq = ' AND '.join('extras_{}:"{}"'.format(*item)
-                          for item in extras.items())
+                          for item in list(extras.items()))
         pkg_dicts = _search_packages(self._api, fq=fq, rows=1000,
                                      include_private=True)
 
@@ -705,7 +705,7 @@ class View(Entity):
         self._parent._set_views_map(views)
 
 
-class ExtrasDictView(collections.MutableMapping):
+class ExtrasDictView(collections.abc.MutableMapping):
     '''
     Wrapper around a CKAN package's "extras".
     '''
