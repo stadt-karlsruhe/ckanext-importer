@@ -519,7 +519,7 @@ class Package(Entity):
         source since the last import.
         '''
         for res_dict in list(self['resources']):
-            eid = res_dict['ckanext_importer_resource_eid']
+            eid = res_dict.get('ckanext_importer_resource_eid')
             if eid not in self._synced_child_eids:
                 res = Resource(eid, res_dict, self)
                 self._log.debug('Deleting unsynced {}'.format(res))
@@ -530,7 +530,7 @@ class Package(Entity):
         # Documentation is in the class docstring
         def _find_entity(self):
             res_dicts = [r for r in self._outer['resources']
-                         if r['ckanext_importer_resource_eid'] == self._eid]
+                         if r.get('ckanext_importer_resource_eid') == self._eid]
             if not res_dicts:
                 raise NotFound('No resource with EID {!r} in {}'.format(self._eid, self._outer))
             if len(res_dicts) > 1:
